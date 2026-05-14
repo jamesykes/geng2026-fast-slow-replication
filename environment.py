@@ -143,18 +143,50 @@ def initialize_q_values(
     num_agents: int,
     num_states: int = 2,
     num_actions: int = 2,
+    mode: str = "figure3",
     initial_value: float = 0.0,
 ) -> np.ndarray:
     """
     Initialize Q-values.
 
-    Q[i, s, a] is agent i's Q-value for action a in state s.
+    mode="zeros":
+        all Q-values are initial_value.
+
+    mode="figure3":
+        hardcoded Q-values chosen so that, with beta=1,
+
+            P(C | s1) = 0.6
+            P(C | s2) = 0.4
+
+        This approximately matches the starting point in Figure 3.
     """
-    return np.full(
-        shape=(num_agents, num_states, num_actions),
-        fill_value=initial_value,
-        dtype=float,
-    )
+    if mode == "zeros":
+        return np.full(
+            shape=(num_agents, num_states, num_actions),
+            fill_value=initial_value,
+            dtype=float,
+        )
+
+    if mode == "figure3":
+        if num_states != 2 or num_actions != 2:
+            raise ValueError("mode='figure3' assumes 2 states and 2 actions.")
+
+        q_gap = np.log(0.6 / 0.4)
+        half_gap = q_gap / 2.0
+
+        Q = np.zeros((num_agents, num_states, num_actions), dtype=float)
+
+        # State s1: cooperation initially favored.
+        Q[:, 0, 0] = half_gap
+        Q[:, 0, 1] = -half_gap
+
+        # State s2: defection initially favored.
+        Q[:, 1, 0] = -half_gap
+        Q[:, 1, 1] = half_gap
+
+        return Q
+
+    raise ValueError(f"Unknown Q initialization mode: {mode}")
 
 
 def softmax_policy(Q: np.ndarray, beta: float) -> np.ndarray:
@@ -369,10 +401,7 @@ def run_simulation(
         rng=rng,
         prob_good=initial_prob_good,
     )
-    Q = initialize_q_values(
-        num_agents=num_agents,
-        initial_value=initial_q_value,
-    )
+    Q = initialize_q_values(num_agents)
 
     history = {
         "state_0_fraction": [],
@@ -426,7 +455,7 @@ import matplotlib.pyplot as plt
 
 
 history = run_simulation(
-    num_steps=100_000,
+    num_steps=50_000,
     seed=0,
     alpha=0.001,
     beta=1.0,
