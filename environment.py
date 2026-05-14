@@ -145,6 +145,8 @@ def initialize_q_values(
     num_actions: int = 2,
     mode: str = "figure3",
     initial_value: float = 0.0,
+    state_0_baseline: float = 5.0,
+    state_1_baseline: float = 0.0,
 ) -> np.ndarray:
     """
     Initialize Q-values.
@@ -158,7 +160,8 @@ def initialize_q_values(
             P(C | s1) = 0.6
             P(C | s2) = 0.4
 
-        This approximately matches the starting point in Figure 3.
+        The state baselines control the absolute value of each state
+        without changing the initial policy.
     """
     if mode == "zeros":
         return np.full(
@@ -177,12 +180,12 @@ def initialize_q_values(
         Q = np.zeros((num_agents, num_states, num_actions), dtype=float)
 
         # State s1: cooperation initially favored.
-        Q[:, 0, 0] = half_gap
-        Q[:, 0, 1] = -half_gap
+        Q[:, 0, 0] = state_0_baseline + half_gap
+        Q[:, 0, 1] = state_0_baseline - half_gap
 
         # State s2: defection initially favored.
-        Q[:, 1, 0] = -half_gap
-        Q[:, 1, 1] = half_gap
+        Q[:, 1, 0] = state_1_baseline - half_gap
+        Q[:, 1, 1] = state_1_baseline + half_gap
 
         return Q
 
@@ -384,6 +387,8 @@ def run_simulation(
     alpha: float = 0.001,
     beta: float = 1.0,
     gamma: float = 0.8,
+    state_0_baseline: float = 0.0,
+    state_1_baseline: float = 0.0,
     initial_q_value: float = 0.0,
     initial_prob_good: float = 0.5,
 ) -> dict[str, np.ndarray]:
@@ -401,7 +406,7 @@ def run_simulation(
         rng=rng,
         prob_good=initial_prob_good,
     )
-    Q = initialize_q_values(num_agents)
+    Q = initialize_q_values(num_agents, state_0_baseline=state_0_baseline, state_1_baseline=state_1_baseline)
 
     history = {
         "state_0_fraction": [],
@@ -439,69 +444,179 @@ def run_simulation(
         for key, values in history.items()
     }
 
-# history = run_simulation(
-#     num_steps=20_000,
-#     seed=0,
-#     alpha=0.001,
-#     beta=1.0,
-#     gamma=0.8,
-# )
-#
-# print(history["coop_prob_state_0"][:5])
-# print(history["coop_prob_state_0"][-5:])
-# print(history["coop_prob_state_1"][-5:])
-
 import matplotlib.pyplot as plt
 
 
+def rolling_average(x: np.ndarray, window: int) -> np.ndarray:
+    """
+    Rolling average for plotting.
+
+    Pads the start and end using edge values, so the smoothed curve
+    does not artificially drop near the boundaries.
+    """
+    if window <= 1:
+        return x
+
+    left_pad = window // 2
+    right_pad = window - 1 - left_pad
+
+    x_padded = np.pad(
+        x,
+        pad_width=(left_pad, right_pad),
+        mode="edge",
+    )
+
+
+    kernel = np.ones(window) / window
+    return np.convolve(x_padded, kernel, mode="valid")
+
+def q_initialization_label(
+    beta: float,
+    state_0_baseline: float,
+    state_1_baseline: float,
+    coop_prob_state_0: float = 0.6,
+    coop_prob_state_1: float = 0.4,
+) -> str:
+    """
+    Build a readable label showing the initial Q-values.
+    Assumes the Figure 3-style initialization.
+    """
+    gap_0 = (1.0 / beta) * np.log(coop_prob_state_0 / (1.0 - coop_prob_state_0))
+    gap_1 = (1.0 / beta) * np.log(coop_prob_state_1 / (1.0 - coop_prob_state_1))
+
+    q_s1_c = state_0_baseline + gap_0 / 2.0
+    q_s1_d = state_0_baseline - gap_0 / 2.0
+
+    q_s2_c = state_1_baseline + gap_1 / 2.0
+    q_s2_d = state_1_baseline - gap_1 / 2.0
+
+    return (
+        f"Initial Q-values: "
+        f"Q(s1,C)={q_s1_c:.3f}, Q(s1,D)={q_s1_d:.3f}; "
+        f"Q(s2,C)={q_s2_c:.3f}, Q(s2,D)={q_s2_d:.3f}"
+    )
+
+PAPER_GREEN = "#6FA08B"
+PAPER_ORANGE = "#E8B17D"
+
+def plot_cooperation_probabilities(
+    history: dict[str, np.ndarray],
+    beta: float,
+    state_0_baseline: float,
+    state_1_baseline: float,
+) -> None:
+    time = np.arange(len(history["coop_prob_state_0"]))
+
+    init_label = q_initialization_label(
+        beta=beta,
+        state_0_baseline=state_0_baseline,
+        state_1_baseline=state_1_baseline,
+    )
+
+    plt.figure(figsize=(9, 5))
+
+    plt.plot(
+        time,
+        history["coop_prob_state_0"],
+        label="Cooperation probability in state s1",
+        linewidth=2,
+        color=PAPER_GREEN,
+    )
+
+    plt.plot(
+        time,
+        history["coop_prob_state_1"],
+        label="Cooperation probability in state s2",
+        linewidth=2,
+        color=PAPER_ORANGE,
+    )
+
+    plt.xlabel("Time step")
+    plt.ylabel("Mean probability of cooperation")
+    plt.ylim(0, 1)
+
+    plt.title("Policy evolution\n" + init_label, fontsize=10)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def plot_state_fractions(
+    history: dict[str, np.ndarray],
+    beta: float,
+    state_0_baseline: float,
+    state_1_baseline: float,
+    smoothing_window: int = 500,
+) -> None:
+    time = np.arange(len(history["state_0_fraction"]))
+
+    init_label = q_initialization_label(
+        beta=beta,
+        state_0_baseline=state_0_baseline,
+        state_1_baseline=state_1_baseline,
+    )
+
+    state_0_smoothed = rolling_average(
+        history["state_0_fraction"],
+        window=smoothing_window,
+    )
+
+    state_1_smoothed = rolling_average(
+        history["state_1_fraction"],
+        window=smoothing_window,
+    )
+
+    plt.figure(figsize=(9, 5))
+
+    plt.plot(
+        time,
+        state_0_smoothed,
+        label="Fraction of edges in state s1",
+        linewidth=2,
+        color=PAPER_GREEN,
+    )
+
+    plt.plot(
+        time,
+        state_1_smoothed,
+        label="Fraction of edges in state s2",
+        linewidth=2,
+        color=PAPER_ORANGE,
+    )
+
+    plt.xlabel("Time step")
+    plt.ylabel("Fraction of edges")
+    plt.ylim(0, 1)
+
+    plt.title("State distribution\n" + init_label, fontsize=10)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+state_0_baseline = 5.0
+state_1_baseline = 0.0
+
 history = run_simulation(
-    num_steps=50_000,
+    num_steps=20_000,
     seed=0,
     alpha=0.001,
     beta=1.0,
     gamma=0.8,
+    initial_prob_good=0.5,
+    state_0_baseline=state_0_baseline,
+    state_1_baseline=state_1_baseline,
 )
 
-time = np.arange(len(history["coop_prob_state_0"]))
-
-plt.figure(figsize=(8, 5))
-
-plt.plot(
-    time,
-    history["coop_prob_state_0"],
-    label="Cooperation probability in state s1",
+plot_cooperation_probabilities(
+    history=history,
+    beta=1.0,
+    state_0_baseline=state_0_baseline,
+    state_1_baseline=state_1_baseline,
 )
 
-plt.plot(
-    time,
-    history["coop_prob_state_1"],
-    label="Cooperation probability in state s2",
+plot_state_fractions(
+    history=history,
+    beta=1.0,
+    state_0_baseline=state_0_baseline,
+    state_1_baseline=state_1_baseline,
+    smoothing_window=500,
 )
-
-plt.xlabel("Time step")
-plt.ylabel("Mean probability of cooperation")
-plt.ylim(0, 1)
-plt.legend()
-plt.tight_layout()
-plt.show()
-
-# plt.figure(figsize=(8, 5))
-#
-# plt.plot(
-#     time,
-#     history["state_0_fraction"],
-#     label="Fraction of edges in state s1",
-# )
-#
-# plt.plot(
-#     time,
-#     history["state_1_fraction"],
-#     label="Fraction of edges in state s2",
-# )
-#
-# plt.xlabel("Time step")
-# plt.ylabel("Fraction of edges")
-# plt.ylim(0, 1)
-# plt.legend()
-# plt.tight_layout()
-# plt.show()
