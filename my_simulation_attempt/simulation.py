@@ -470,6 +470,35 @@ def rolling_average(x: np.ndarray, window: int) -> np.ndarray:
     kernel = np.ones(window) / window
     return np.convolve(x_padded, kernel, mode="valid")
 
+
+def trailing_rolling_average(x: np.ndarray, window: int) -> np.ndarray:
+    """
+    Trailing rolling average for plotting.
+
+    At time t, averages over the previous `window` points, including t.
+    Near the beginning, it averages over the available points only.
+
+    This preserves the true initial value:
+        smoothed[0] == x[0]
+    """
+    if window <= 1:
+        return x.copy()
+
+    x = np.asarray(x, dtype=float)
+
+    cumulative_sum = np.cumsum(np.insert(x, 0, 0.0))
+
+    smoothed = np.empty_like(x, dtype=float)
+
+    for t in range(len(x)):
+        start = max(0, t - window + 1)
+        total = cumulative_sum[t + 1] - cumulative_sum[start]
+        count = t - start + 1
+        smoothed[t] = total / count
+
+    return smoothed
+
+
 def q_initialization_label(
     beta: float,
     state_0_baseline: float,
@@ -555,12 +584,12 @@ def plot_state_fractions(
         state_1_baseline=state_1_baseline,
     )
 
-    state_0_smoothed = rolling_average(
+    state_0_smoothed = trailing_rolling_average(
         history["state_0_fraction"],
         window=smoothing_window,
     )
 
-    state_1_smoothed = rolling_average(
+    state_1_smoothed = trailing_rolling_average(
         history["state_1_fraction"],
         window=smoothing_window,
     )
@@ -592,16 +621,16 @@ def plot_state_fractions(
     plt.tight_layout()
     plt.show()
 
-state_0_baseline = 5.0
+state_0_baseline = 10.0
 state_1_baseline = 0.0
 
 history = run_simulation(
-    num_steps=20_000,
+    num_steps=2_000,
     seed=0,
     alpha=0.001,
     beta=1.0,
     gamma=0.8,
-    initial_prob_good=0.5,
+    initial_prob_good=0.25,
     state_0_baseline=state_0_baseline,
     state_1_baseline=state_1_baseline,
 )
@@ -618,5 +647,5 @@ plot_state_fractions(
     beta=1.0,
     state_0_baseline=state_0_baseline,
     state_1_baseline=state_1_baseline,
-    smoothing_window=500,
+    smoothing_window=200,
 )
