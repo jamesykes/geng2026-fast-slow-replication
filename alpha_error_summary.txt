@@ -1,0 +1,21 @@
+Alpha sweep simulation-theory error summary
+
+time_steps: 5000
+num_reps: 10
+record_stride: 100
+s_init_prob: (0.45, 0.55)
+metric_times: [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2900, 3000, 3100, 3200, 3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200, 4300, 4400, 4500, 4600, 4700, 4800, 4900, 5000]
+
+Definitions:
+  s2_coop = mean policy probability X(state=s2, action=cooperate)
+  s1_frac = fraction of connected edges in state s1
+  s2_frac = fraction of connected edges in state s2
+  errors are absolute simulation minus theory at recorded time points
+
+alpha	max_abs_err_s2_coop	mean_abs_err_s2_coop	final_abs_err_s2_coop	max_abs_err_s1_frac	mean_abs_err_s1_frac	max_abs_err_s2_frac	mean_abs_err_s2_frac	final_sim_s2_coop	final_theory_s2_coop
+0.1	0.000010	0.000001	0.000000	0.024892	0.005214	0.024892	0.005214	1.000000	1.000000
+0.2	0.007972	0.000878	0.000077	0.024892	0.005272	0.024892	0.005272	0.999923	1.000000
+0.5	0.040490	0.001821	0.000317	0.030250	0.005547	0.030250	0.005547	0.999683	1.000000
+1	0.033772	0.000994	0.000134	0.026750	0.005385	0.026750	0.005385	0.999866	1.000000
+2	0.656001	0.617352	0.638000	0.274750	0.238150	0.274750	0.238150	0.362000	1.000000
+5	0.000000	0.000000	nan	0.024892	0.024892	0.024892	0.024892	0.290000	nan
