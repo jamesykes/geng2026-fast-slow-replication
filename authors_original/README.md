@@ -20,7 +20,30 @@ This repository contains:
 | `experiments_theory.py` | Runs the theory experiments and saves results to `data/`. |
 | `plot_main.py` | Generates the main-text figures into `figures/`. |
 | `plot_SI.py` | Generates the supplementary figures into `figures/`. |
+| `run_high_alpha.py` | Runs a higher-learning-rate `alpha` sweep based on the Figure 3 setup. |
 | `SI.pdf` | Supplementary Material PDF. |
+
+## High learning-rate experiments
+
+The authors' Figure 3 alpha sweep uses `alpha = 0.0002, 0.0005, 0.001`.
+To probe larger learning rates without overwriting the reproduction data, run:
+
+```bash
+cd authors_original
+python run_high_alpha.py
+```
+
+By default this writes:
+
+- `data/high_alpha/high_alpha_sweep.npz`
+- `data/high_alpha/high_alpha_summary.csv`
+- `figures/high_alpha/high_alpha_sweep.png`
+
+For a quick smoke run:
+
+```bash
+python run_high_alpha.py --alphas 0.001,0.01,0.1 --time-steps 200 --num-reps 2
+```
 
 ## Requirements
 
