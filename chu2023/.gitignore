@@ -1,0 +1,4 @@
+/outputs/
+/.pytest_cache/
+/.test-deps/
+*.egg-info/

@@ -11,7 +11,7 @@ Sources inspected in full:
 
 The parent repository's `README.md` says that `chu2023/` contains the Chu et al. code and reference paper, separate from later replication work. No local `AGENTS.md` was present when this specification was written.
 
-The Git worktree already contained unrelated changes before this work began: a modified parent `README.md`, an untracked output directory under `../replication/`, and staged deletions of `Dynamics_of_Q-Learning_in_Networked_Stochastic_Games.pdf` and `case2_1_jax.py` in this directory. Those files and changes were not restored, modified, or used as sources here.
+The previously staged deletions of `Dynamics_of_Q-Learning_in_Networked_Stochastic_Games.pdf` and `case2_1_jax.py` were later confirmed to be intentional and committed. Neither deleted file was used as a source for this specification.
 
 ## 2. Model targeted by the script
 
@@ -433,55 +433,273 @@ A faithful finite-population simulator should use:
 - vectorised old-state/joint-action transition for every edge after payoff evaluation;
 - explicit PRNG-key threading and recorded seeds.
 
-Drawing one action per edge would define a different model and would erase an important shared-action source of cross-edge dependence. The paper explicitly requires one action per agent, reused against all opponents.
-
-## 17. Variance target and the limit of pair closure
-
-Let `K = n-1`, and let `Y_ih(a)` be focal agent `i`'s payoff from opponent `h` when the focal action is `a`. Conditional on `i` selecting `a`, its realised chosen-coordinate increment is
+The finite-population ABM uses continuous Q-values after initialisation. Its selected-coordinate update is the unprojected learning rule
 
 ```text
-Delta Q_i(a) = alpha ((1/K) sum_h Y_ih(a) - Q_i(a)).
+Q_{t+1}^i(a_j) = Q_t^i(a_j) + alpha [r_t^i(a_j) - Q_t^i(a_j)].
 ```
 
-Therefore,
+Nearest-grid projection belongs only to the numerical pair-mass solver. "Grid-matched initialisation" means that initial agent Q-vectors may be sampled from a discrete pair-solver histogram; it never means that subsequent ABM updates are quantised.
+
+For the primary controlled theory-versus-ABM comparison:
+
+- the pair solver constructs a seeded discrete one-agent Q histogram;
+- initial ABM Q-vectors are sampled from that same realised histogram;
+- initial ABM edge states are sampled independently with probability `1/2` for `SH` and `1/2` for `PD`, matching the factor `0.5` in the scripted initial pair mass;
+- continuous scaled-Beta initial Q-values remain available as a secondary, paper-like ABM mode.
+
+Drawing one action per edge would define a different model. The paper explicitly requires one action per agent, reused against all opponents. Conditional on an exact current focal Q-vector and the current focal action, that focal action is fixed and is not itself a contemporaneous source of cross-edge covariance. The rule nevertheless matters for covariance because reusing focal actions over earlier timesteps can correlate the persistent histories of incident edge states.
+
+## 17. Primary variance estimand
+
+For focal agent `i` and action/Q-coordinate `j`, define the realised coordinate velocity at time `t` by
 
 ```text
-Var[Delta Q_i(a) | conditioning]
-  = alpha^2 / K^2 *
-    (sum_h Var[Y_ih] + 2 sum_{h<l} Cov[Y_ih, Y_il]).
+v_j^i
+  = Q_{t+1}^i(a_j) - Q_t^i(a_j)
+  = 1{A_t^i = a_j} alpha [r_t^i(a_j) - Q_t^i(a_j)].
 ```
 
-If distinct opponents are exchangeable with per-edge variance `sigma^2` and distinct-edge covariance `c`, this becomes
+The primary estimand is the local, one-step conditional variance
 
 ```text
-alpha^2 (sigma^2/K + (K-1)c/K).
+D_j(q,t) = Var[v_j^i | Q_t^i = q, A_t^i = a_j].
 ```
 
-The pair distribution can supply a focal-Q-conditioned single-edge payoff law and hence a candidate `sigma^2`. It cannot determine `c`, because `c` requires a triplet/two-edge marginal such as
+Conditional on `A_t^i = a_j`, the indicator is one. Conditional on the exact Q-vector `q`, `q_j` is constant. Therefore
 
 ```text
-p(Q_i, s_ih, Q_h, s_il, Q_l).
+D_j(q,t)
+  = alpha^2 Var[r_t^i(a_j) | Q_t^i = q, A_t^i = a_j].
 ```
 
-Possible later approaches are:
+This conditioning is part of the scientific definition, not merely an estimation convenience:
 
-1. impose conditional independence and set `c = 0` as a clearly labelled pair-closure prediction;
-2. introduce and validate a triplet closure;
-3. estimate `c` directly from the ABM, stratified by time, focal Q, and focal action;
-4. use the law of total covariance to separate dependence due to the shared focal action/Q from residual edge-edge dependence.
+- conditioning on the complete Q-vector prevents stochastic reward noise from being mixed with heterogeneity between agents at different Q-values;
+- conditioning on the selected action identifies the coordinate that is actually updated;
+- under the model, the current focal action is sampled only from the focal Q-vector, so at exact `q` conditioning additionally on `A_t^i = a_j` does not change the current conditional distribution of opponents or incident edge states;
+- nevertheless, the action condition is retained to make the realised-update interpretation explicit.
 
-The unconditional variance of the full vector update additionally contains the mixture variance from whether action `a` was selected at all. It must not be conflated with the conditional variance of the paper's counterfactual velocity `v_a(Q,a)`.
+This `D_j(q,t)` is not the covariance between the `C` and `D` velocity coordinates. It is also not an unconditional coordinate-update variance that mixes selected and unselected actions.
 
-## 18. Questions not answerable from the available files
+## 18. Edge variance, cross-opponent covariance, and exact decomposition
+
+Let `N = n-1`. For opponent `h`, define the counterfactual one-edge payoff for focal action `j` as
+
+```text
+Y_ih^(j) = e_j^T M_{s_t^{ih}} e_{A_t^h}.
+```
+
+Conditional on the focal action `j`, the realised reward is
+
+```text
+r_t^i(a_j) = (1/N) sum_h Y_ih^(j).
+```
+
+For exchangeable distinct opponents, define
+
+```text
+mu_j(q,t)
+  = E[Y_ih^(j) | Q_t^i=q, A_t^i=a_j],
+
+sigma_j^2(q,t)
+  = Var[Y_ih^(j) | Q_t^i=q, A_t^i=a_j],
+
+c_j(q,t)
+  = Cov[Y_ih^(j), Y_ik^(j) | Q_t^i=q, A_t^i=a_j],  h != k.
+```
+
+The exact variance identity is
+
+```text
+D_j(q,t)
+  = alpha^2 [sigma_j^2(q,t)/N + (N-1)c_j(q,t)/N]
+  = alpha^2 [sigma_j^2(q,t)/(n-1) + (n-2)c_j(q,t)/(n-1)].
+```
+
+The cross-opponent covariance `c_j` concerns payoffs on two distinct edges sharing a focal agent. It is not the covariance between the `C` and `D` Q-coordinate velocities and is not merely the negative covariance between multinomial category counts.
+
+Because the current focal action is fixed by the conditioning, `c_j` must not be described as simply arising from the current shared focal action. Nonzero covariance can instead survive because earlier one-action-per-agent draws jointly affected all incident edges and thereby correlated their persistent state histories. Conditioning only on the current focal Q-vector also marginalises over latent incident-edge configurations that can induce cross-edge dependence.
+
+## 19. One-edge moments supplied by the pair density
+
+The pair mass `p(q,s,q',t)` determines the conditional law of one randomly chosen incident edge. In the discrete implementation define
+
+```text
+f(q,t) = sum_s sum_q' p(q,s,q',t)
+
+w_sb(q,t)
+  = [sum_q' p(q,s,q',t) x_b(q')] / f(q,t).
+```
+
+Here `w_sb(q,t)` is the probability, conditional on focal `Q=q`, that the sampled incident edge is in state `s` and the opponent selects action `b`. It sums to one over `(s,b)` whenever `f(q,t) > 0`.
+
+For
+
+```text
+y_j(s,b) = e_j^T M_s e_b,
+```
+
+the pair-derived conditional moments are
+
+```text
+mu_j^pair(q,t)
+  = sum_s,b w_sb(q,t) y_j(s,b),
+
+m2_j^pair(q,t)
+  = sum_s,b w_sb(q,t) y_j(s,b)^2,
+
+sigma_j,pair^2(q,t)
+  = m2_j^pair(q,t) - (mu_j^pair(q,t))^2.
+```
+
+These are computable by the same state-slice matrix-vector contractions used for the mean payoff, with a second payoff-squared lookup. They should be produced for both focal actions wherever the focal mass is nonzero.
+
+The pair density does not determine `c_j`, because that requires a joint distribution of two edges sharing the same focal agent, for example
+
+```text
+p(Q_i, s_ih, Q_h, s_ik, Q_k, t).
+```
+
+The pure pair-closure prediction is therefore explicitly
+
+```text
+D_j^pair(q,t)
+  = alpha^2 sigma_j,pair^2(q,t)/(n-1),
+```
+
+with `c_j=0` clearly labelled as a conditional-independence closure. For the first project version, `c_j` will be measured from the ABM; no triplet-density closure will be derived or implemented.
+
+Pair-density evolution is independent of finite population size `n`. Once one pair trajectory has been solved for a model parameter set and initial condition, its one-edge moments can be reused to form `c_j=0` predictions for multiple values of `n`. Separate ABM simulations remain necessary for each `n`, because finite-population trajectories and `c_j` can depend on `n`.
+
+## 20. O(N) ABM moment and covariance estimator
+
+The ABM must not enumerate all ordered pairs of opponents. For one focal agent/configuration and one counterfactual focal action `j`, compute
+
+```text
+S1 = sum_h Y_ih^(j),
+S2 = sum_h (Y_ih^(j))^2.
+```
+
+Then
+
+```text
+S1^2 - S2 = sum_{h != k} Y_ih^(j) Y_ik^(j).
+```
+
+For `N > 1`, the per-focal sufficient statistics are
+
+```text
+edge_mean_i        = S1/N,
+edge_second_i      = S2/N,
+distinct_product_i = (S1^2-S2)/(N(N-1)).
+```
+
+Under common conditional weights, their conditional expectations give
+
+```text
+mu_j       = E[edge_mean_i],
+sigma_j^2  = E[edge_second_i] - mu_j^2,
+c_j        = E[distinct_product_i] - mu_j^2.
+```
+
+The corresponding average-reward variance is
+
+```text
+sigma_j^2/N + (N-1)c_j/N.
+```
+
+Using consistent raw-moment weights makes this decomposition an algebraic estimator check, apart from finite-sample bias conventions and floating-point error. `c_j` is undefined for `n=2` (`N=1`), where only the single-edge variance term exists.
+
+Both `Y_ih^(C)` and `Y_ih^(D)` may be computed from the same current edge states and realised opponent actions, regardless of the focal action actually selected. These are counterfactual diagnostic quantities that improve estimation of `mu_j`, `sigma_j^2`, and `c_j`. Direct validation of realised velocity must still use only agents whose coordinate `j` was actually selected and updated.
+
+## 21. Estimating exact-Q conditional moments from finite ABM data
+
+Exact conditioning on a continuous `Q=q` is unavailable from finite simulations. The first implementation will use configurable narrow two-dimensional Q-bins; kernel smoothing or local regression is deferred unless binning proves inadequate.
+
+For every action, time, and bin, record:
+
+- the selected-action and counterfactual diagnostic sample counts;
+- the Q-coordinate means, covariance, ranges, and other dispersion diagnostics;
+- conditional first and second moments of reward and realised velocity;
+- one-edge first/second moments and distinct-edge products;
+- the bin edges and the weighting rule;
+- occupancy/quality flags, with sparse bins suppressed or clearly marked.
+
+A finite-width bin is only an approximation to exact-Q conditioning. In particular,
+
+```text
+Var[alpha(r-Q_j) | Q in B, A=j]
+  = alpha^2 [Var(r | B,A=j)
+             + Var(Q_j | B,A=j)
+             - 2 Cov(r,Q_j | B,A=j)],
+```
+
+so it is not generally equal to `alpha^2 Var[r | Q in B,A=j]`. The direct realised-velocity bin variance and reward-based bin variance must both be reported during validation, together with the Q-dispersion and reward-Q covariance terms. They should converge as bins narrow if the local estimator is behaving properly.
+
+Action conditioning also affects finite-bin weights even though it has no effect at exact `q`: within a bin, `x_j(q)` varies, so the Q distribution among samples with realised `A=j` is proportional to occupancy times `x_j(q)`. Pair predictions must therefore use the same empirical selected-sample Q weights, or theoretical weights proportional to pair occupancy times `x_j(q)`, rather than evaluating only at the bin centre. Counterfactual all-agent ABM diagnostics must likewise be restricted or reweighted when they are compared with the selected-action target.
+
+For pair-theory bin comparisons, retain the distinction between:
+
+- an occupancy-weighted average of local exact-grid variances `sigma_j,pair^2(q,t)`; and
+- the variance of the pooled one-edge mixture in a bin, obtained by averaging `m2_j^pair` and `mu_j^pair` before subtracting the squared pooled mean.
+
+The first targets an average of local exact-Q variances; the second matches a pooled finite-bin edge distribution and includes between-Q variation of the conditional mean. Both can be useful, but they must not be interchanged. Initial results must include bin-refinement checks and avoid conclusions driven by poorly populated or overly wide bins.
+
+## 22. Required initial variance comparisons
+
+The initial comparison has four separate checks:
+
+1. **Direct ABM variance.** Estimate `D_j(q,t)` from realised chosen-coordinate ABM velocities, using narrow Q-bins as a documented approximation to exact-Q conditioning.
+2. **ABM decomposition check.** Estimate `sigma_j,ABM^2` and `c_j,ABM`, and verify
+
+   ```text
+   D_j^ABM approximately equals
+     alpha^2 [sigma_j,ABM^2/(n-1)
+              + (n-2)c_j,ABM/(n-1)].
+   ```
+
+   At finite bin width, first verify the reward-variance identity exactly with matched moments, then account for the documented Q-dispersion/reward-Q-covariance difference between reward variance and raw realised-velocity variance.
+3. **One-edge pair check.** Compare `sigma_j,pair^2` with `sigma_j,ABM^2` under matched Q-bin and action-conditioning weights. This isolates the accuracy of the pair solver's one-edge payoff law.
+4. **Theory comparison.** Compare direct ABM variance with both the pure `c_j=0` pair prediction and the diagnostic hybrid
+
+   ```text
+   alpha^2 [sigma_j,pair^2/(n-1)
+            + (n-2)c_j,ABM/(n-1)].
+   ```
+
+This separation distinguishes error in the one-edge pair distribution from missing cross-opponent covariance.
+
+## 23. Primary outputs, uncertainty, and scaling checks
+
+Primary outputs are:
+
+- Q-resolved `D_j`, `sigma_j^2`, and `c_j` estimates at selected times;
+- heatmaps or tables restricted to sufficiently populated two-dimensional Q-bins;
+- occupancy-weighted time-series summaries with matched theory/ABM Q weighting;
+- direct, decomposed, pure-pair, and hybrid predictions kept as distinct named series;
+- uncertainty intervals for which independent simulation runs are the primary sampling units;
+- retained focal-agent identifiers for repeated-measure diagnostics, without treating agents from one complete-network run as independent replicates;
+- scaling checks over population size `n` and learning rate `alpha`.
+
+Under the `c_j=0` closure, variance scales as `1/(n-1)`. At a fixed distributional snapshot all conditional velocity variances scale as `alpha^2`. Changing `alpha` throughout an evolution also changes later Q/state distributions, so a full trajectory comparison across learning rates requires separate ABM simulations and pair evolutions rather than a post-hoc rescaling.
+
+The following are secondary or future objects and are not primary targets for the first version:
+
+- unconditional coordinate-update variance without conditioning on focal action;
+- covariance between `C` and `D` velocity coordinates;
+- an analytical triplet-density closure for `c_j`;
+- long-time diffusion or Fokker-Planck approximations;
+- local-regression or kernel estimators unless binning diagnostics show they are needed.
+
+The immediate scientific question is whether `c_j` is negligible and, when it is not, whether adding the empirically measured `c_j` explains the discrepancy between direct ABM variance and the conditional-independence pair prediction.
+
+## 24. Remaining questions not answerable from the available files
 
 1. Which random seed and exact empirical Beta histogram, if any, generated the theoretical dots in Figure 1(b)?
 2. Was the released script's nearest-grid pushforward the exact numerical method used for the paper, and what convergence checks were performed? The main paper defers derivation details to supplementary material that is not present locally.
-3. Is the initial random state probability exactly one half in the agent-based simulations, and are different edge states sampled independently? The script encodes one-half pair mass; the paper only says states are determined at random.
-4. In the planned variance study, is "realised Q-learning velocity" meant conditionally on focal Q and selected action, unconditionally for a randomly selected coordinate, or as a population-level sample statistic?
-5. Which sources of variance should the theory include: opponent action draws, focal action draws, finite empirical Q/state composition, random initialisation, transition history, and/or variation between simulation runs?
-6. Should cross-opponent covariance be predicted with a declared conditional-independence closure, a new triplet approximation, or treated as an empirically measured correction?
-7. Should the ABM initialise continuous Q-values exactly from the Beta laws or use the pair solver's discretised empirical histogram for like-for-like comparisons? Both comparisons are useful but answer different questions.
-8. What boundary behaviour should apply for future payoff matrices, learning rates, or Q-ranges that violate the current convex-range invariant?
-9. After exact legacy parity, should the production pair solver retain nearest-grid rounding or adopt conservative interpolation/convergence refinement?
-10. What GPU hardware, memory budget, precision requirement, and reproducibility tolerance will define the target scale?
-11. Are the staged deletions of the older PDF and `case2_1_jax.py` intentional and permanent? They were treated as user-owned worktree state and not inspected or changed.
+3. Was the paper's own ABM initial state probability exactly one half, and were different initial edge states independent? This remains historically unclear, but it does not block the project: the controlled baseline is fixed to independent `1/2` state draws.
+4. What minimum bin count, bin-refinement schedule, and run-level uncertainty procedure will be adequate for the available simulation budget?
+5. What boundary behaviour should apply for future payoff matrices, learning rates, or Q-ranges that violate the current convex-range invariant?
+6. After exact legacy parity, should the production pair solver retain nearest-grid rounding or adopt conservative interpolation/convergence refinement?
+7. What GPU hardware, memory budget, precision requirement, and reproducibility tolerance will define the target scale?
