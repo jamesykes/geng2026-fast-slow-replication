@@ -10,7 +10,8 @@
 - Use small grids in ordinary tests. Never run the original full-grid script as a test.
 - The Phase 2 ABM uses one packed state per undirected edge and one action per agent per step.
 - Keep scan records agent-sized; edge payoffs may appear only in one-step debug records.
-- Do not add Phase 3 S1/S2 covariance statistics, Q bins, pair-JAX transport, or GPU benchmarks yet.
+- Phase 3A may retain selected-action `S1`/`S2` and two-dimensional Q-bin moments only at agent/run/time scale; never retain time-indexed edge-payoff histories.
+- Do not add counterfactual unselected-action instrumentation, confidence intervals, pair-JAX transport, final comparison experiments, or GPU benchmarks yet.
 
 Commands:
 
@@ -19,6 +20,8 @@ python -m pip install -e ".[test]"
 python -m pytest -q
 python -m pytest -q tests/test_pair_transport.py tests/test_pair_moments.py
 python -m pytest -q tests/test_abm_graph.py tests/test_abm_one_step.py tests/test_abm_sampling.py tests/test_abm_simulation.py tests/test_abm_runner.py
+python -m pytest -q tests/test_abm_variance.py tests/test_abm_variance_runner.py
 JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
 python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
+python experiments/run_abm_variance_diagnostic.py --config configs/abm_variance_diagnostic_small.toml
 ```

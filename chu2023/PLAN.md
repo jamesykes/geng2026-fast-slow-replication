@@ -18,7 +18,7 @@ D_j(q,t) = Var[v_j^i | Q_t^i=q, A_t^i=a_j]
 
 The first version will measure distinct-opponent covariance from the ABM and will treat `c_j=0` only as an explicitly labelled conditional-independence pair closure. It will not implement a triplet closure or substitute an unconditional action-mixture variance for `D_j(q,t)`.
 
-The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1 and 2 are implemented; GPU pair transport, Q-bin/covariance instrumentation, bootstrap intervals, and full variance experiments remain future work.
+The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1, 2, and the bounded selected-action Phase 3A instrumentation milestone are implemented; counterfactual diagnostics, GPU pair transport, bootstrap intervals, and full variance experiments remain future work.
 
 ## 2. Proposed repository structure
 
@@ -214,43 +214,44 @@ Exit gate:
 
 ## 7. Phase 3 - ABM variance and covariance instrumentation
 
-Implement the primary estimand before the full pair rewrite.
+### Phase 3A - selected-action moments and binning
 
-For each focal agent and counterfactual focal action `j`, stream
+Status: **complete (2026-08-18)**.
+
+Phase 3A implements the primary realised selected-coordinate sample before the full pair rewrite. For each focal agent with realised action `j=A_t^i`, it streams
 
 ```text
-S1 = sum_h Y_ih^(j),
-S2 = sum_h (Y_ih^(j))^2,
-distinct_product = (S1^2-S2)/(N(N-1)),  N=n-1,
+S1 = sum_h Y_ih,
+S2 = sum_h Y_ih^2,
+distinct_sum = S1^2-S2,  N=n-1,
 ```
 
-without enumerating opponent pairs. Compute both counterfactual action diagnostics from current edge states and realised opponent actions, but mark them as counterfactual. Direct realised-velocity samples must be restricted to agents with `A_i=j`.
+from the old-state endpoint payoffs already used by the ABM. It does not enumerate opponent pairs, insert an unselected-coordinate zero, retain edge histories, or consume another random key.
 
-Tasks:
+Implemented scope:
 
-1. Accumulate per-focal `S1`, `S2`, edge mean, edge second moment, and distinct-edge product for both focal actions.
-2. Record selected-coordinate realised velocity and the corresponding realised average reward.
-3. Implement configurable narrow two-dimensional Q-bins with selected-action counts, counterfactual counts, Q means/covariance/ranges, and sparse-bin flags.
-4. Within finite bins, match the selected-action Q distribution. Counterfactual all-agent diagnostics must be restricted or weighted by `x_j(q)` when compared with selected-action targets.
-5. Estimate conditional first and second moments rather than relying only on a black-box sample variance.
-6. Report both
+1. Retain source `Q_t`, realised selected action, selected `Q_t(j)`, reward, velocity, `S1`, and `S2` with explicit run/time/agent axes.
+2. Aggregate by independent run, source time, two-dimensional source-Q bin, and selected action.
+3. Store counts and raw sums for `S1`, `S2`, `S1^2-S2`, reward, selected Q, reward-selected-Q products, velocity, and all required squares.
+4. Derive population `mu`, `m2`, `m11`, `sigma^2`, `c`, direct/decomposed reward variance, and direct/finite-bin-corrected velocity variance.
+5. Report both
 
    ```text
    Var[alpha(r-Q_j) | Q in B,A=j]
    ```
 
    and `alpha^2 Var[r | Q in B,A=j]`, plus the exact finite-bin difference from Q dispersion and reward-Q covariance.
-7. Compute `sigma_j,ABM^2` and `c_j,ABM` from consistently weighted raw moments.
-8. Add run and focal-agent identifiers so uncertainty intervals can respect clustering.
-9. Add bin-refinement reports and suppress/flag bins below configurable occupancy thresholds.
+6. Use deterministic `[lower,upper)` two-dimensional bins with the final upper edge included. Retain configured float64 edges for provenance, compare against edges converted to the observation dtype, reject conversion-collapsed edges and genuinely out-of-range observations, and retain explicit empty/underpopulated/validity flags.
+7. Preserve independent runs as the uncertainty-replicate axis and treat `c` as undefined for `n=2`.
+8. Emit a small diagnostic CSV and metadata record without claiming the final pair-theory comparison or inferential intervals.
+9. From raw parsed edge-sequence lengths, and before constructing `QBinSpec` or any NumPy edge copy, guard `R*T*Bc*Bd*2` dense strata, dtype-aware audited peak statistic bytes, and the identical number of dense output rows with fixed caps of 1,000,000 strata, 256 MiB, and 250,000 rows. Only the explicit recorded `--allow-expensive` override bypasses them; TOML parser list memory is outside this guard.
 
-Estimator tests:
+Phase 3A tests establish:
 
 - `S1^2-S2` equals an explicit ordered-distinct-pair sum on tiny arrays;
 - hand-built edge configurations give exact `mu`, `sigma^2`, `c`, and average-reward variance;
 - `n=2` omits `c` and uses only the single-edge term;
-- synthetic conditionally independent edges recover `c=0` within sampling error;
-- synthetic shared-latent configurations recover a known nonzero `c`;
+- exact synthetic configurations recover known `c=0` and nonzero `c`;
 - the raw-moment identity
 
   ```text
@@ -260,12 +261,26 @@ Estimator tests:
 
   closes under the same weights;
 - a deliberately wide Q-bin demonstrates that raw velocity variance differs from `alpha^2` times reward variance by the recorded Q terms;
-- selected-action subsampling and `x_j(q)`-weighted counterfactual diagnostics agree under controlled data;
-- sparse-bin suppression and bin-edge conventions are deterministic.
+- both Q coordinates and the realised action determine the stratum;
+- empty, single-observation, boundary, out-of-range, and sparse-bin behavior is deterministic;
+- batched and separately processed runs agree, while instrumented and uninstrumented simulations have identical actions, trajectories, final states, and final keys;
+- retained histories have no time-by-edge payoff arrays and source-time labels use `Q_t,S_t`.
+- float32 and float64 endpoint tests distinguish configured from effective comparison edges, enforce the final inclusive endpoint, reject adjacent outside values, and reject edges collapsed by dtype conversion;
+- allocation-free resource tests hand-check every estimate component and prove that a 1,000-by-1,000 bin configuration is rejected before simulation or statistic allocation;
+- a zero-step low-limit regression proves configured/effective NumPy edge storage remains visible and rejection precedes `QBinSpec`, while an accepted-order test checks raw and constructed bin counts agree;
+- independent float32/float64 calculations prove that only float32 allocates five conversion arrays and that x64 is not rejected by the removed `40O` double count;
+- the Phase 2 default resource estimate remains byte-for-byte equal to the committed Phase 2 guard, while Phase 3A explicitly requests the three-field instrumented increment.
 
 Exit gate:
 
-- On small CPU runs, the reward variance decomposition closes, the direct realised-velocity variance is separately identified, finite-bin bias terms are visible, and no ordered opponent-pair array is constructed.
+- **Met.** On small CPU runs, the reward variance decomposition closes, direct realised-velocity variance is separately identified, finite-bin Q/covariance terms are visible, independent runs remain separate, and no ordered opponent-pair or time-indexed edge-payoff array is constructed.
+- The 28 focused Phase 3A tests and the associated Phase 2 resource regressions give `115 passed` in the complete default suite.
+
+### Deferred Phase 3 work
+
+- Add separately labelled counterfactual `Y_ih^(C)` and `Y_ih^(D)` diagnostics and their selected-action weighting checks.
+- Add bin-refinement experiments, focal-agent clustering diagnostics, and run-level confidence intervals.
+- Perform the final pair/ABM four-way comparison only after the JAX pair solver exists.
 
 ## 8. Phase 4 - JAX pair solver on CPU
 

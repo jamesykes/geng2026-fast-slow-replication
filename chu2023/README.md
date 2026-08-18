@@ -1,6 +1,6 @@
 # Chu et al. pair-approximation numerics
 
-This self-contained subproject preserves the original `case2_1.py` calculation and develops independently tested numerical components for the model in Chu et al. Phases 1 and 2 provide shared model semantics, a readable small-grid NumPy pair-mass reference, and a finite-population JAX agent-based simulation. Pair-JAX transport, covariance instrumentation, Q-bin estimators, and variance experiments remain later phases.
+This self-contained subproject preserves the original `case2_1.py` calculation and develops independently tested numerical components for the model in Chu et al. Phases 1 and 2 provide shared model semantics, a readable small-grid NumPy pair-mass reference, and a finite-population JAX agent-based simulation. Phase 3A adds selected-action ABM variance instrumentation and two-dimensional Q-bin moment estimators. Pair-JAX transport, counterfactual diagnostics, uncertainty intervals, and final variance comparisons remain later phases.
 
 The scientific and numerical conventions are specified in `MODEL_SPEC.md`; staged work and validation gates are in `PLAN.md`. The original paper and `case2_1.py` are provenance artifacts and must not be edited.
 
@@ -57,5 +57,25 @@ It reports the backend/device and writes configuration, seeds, compact step reco
 Grid-matched histogram construction is separately preflighted before allocation or sampling. Normal runs allow at most 5,000,000 histogram cells, 32 MiB for the actual `int64` count array, and 2,000,000 sample pairs (two Beta variates per pair). These are conservative operational limits, not model parameters; they are not configurable and only the explicit `--allow-expensive` flag bypasses them.
 
 ABM graph/state memory is `O(n^2)` through the `E` edge states. A single scan retains `O(Tn)` agent histories and `O(T)` summaries, not `O(TE)` edge histories. A batch of `R` runs uses `O(Rn^2)` state/working memory and `O(RTn)` retained records.
+
+## Phase 3A variance diagnostic
+
+The instrumented scan records source-time `Q_t`, the one selected action and Q-coordinate, realised reward and velocity, and per-agent payoff sums `S1=sum_h Y_ih` and `S2=sum_h Y_ih^2`. It uses the same actions, random-key stream, payoffs, Q update, and transitions as the Phase 2 scan. Only `(R,T,n)` agent fields are added; edge payoff histories are not retained.
+
+The host estimator preserves the independent-run axis and aggregates by run, source time, two-dimensional source-Q bin, and realised selected action. It uses population (`ddof=0`) raw moments. Distinct-opponent products come from `S1^2-S2`; `c` is explicitly missing for `n=2`. The exact finite-bin velocity calculation includes reward variance, selected-Q variance, and reward-Q covariance rather than silently treating every Q in a bin as its centre.
+
+Bins are `[lower,upper)` in both coordinates, with the last upper edge included. Configured edges are retained as float64 provenance, while classification uses edges converted to the observation Q dtype; conversion is revalidated and collapsed edges are rejected. Out-of-range observations raise instead of being clipped or discarded. CSV and metadata report configured and effective comparison edges separately. Empty and underpopulated strata are emitted with explicit flags, and undefined estimates are blank in CSV output.
+
+After TOML parsing but before any NumPy edge-array copy, graph construction, initialization, simulation, aggregation, or output creation, the diagnostic obtains `Bc` and `Bd` from the raw sequence lengths and preflights the dense strata `S=R*T*Bc*Bd*2`, their estimated peak statistic memory, and the `S` dense CSV rows. This cannot guard memory already consumed by the TOML parser's Python lists. The memory audit includes the `int64` count, ten retained float64 sums, host observation and index work, five float64 product arrays, five additional float64 conversion arrays only for float32 observations (the conversions alias existing host arrays for float64), fourteen returned float64 moments, four validity masks, four retained derivation intermediates, three conservative NumPy expression work arrays, and both configured/effective NumPy bin-edge arrays. Fixed normal-run caps are 1,000,000 strata, 256 MiB estimated peak statistic memory, and 250,000 output rows. Because every stratum is emitted, the row cap is normally the first stratum-count limit; the other caps remain independent safety checks. Configuration cannot weaken these limits; only `--allow-expensive` bypasses and records violations.
+
+The Phase 2 baseline retains its committed baseline resource accounting. The Phase 3A runner explicitly selects the instrumented accounting mode, which adds exactly the three agent-level record arrays `selected_q_t`, `payoff_sums_t`, and `payoff_square_sums_t`, plus the two live payoff accumulators.
+
+Run the small CPU diagnostic with:
+
+```bash
+python experiments/run_abm_variance_diagnostic.py --config configs/abm_variance_diagnostic_small.toml
+```
+
+It writes `binned_moments.csv` and reproducibility/formula metadata beneath ignored `outputs/abm_variance/`. The current milestone has 28 focused Phase 3A tests and 115 tests in the complete suite. It does not implement counterfactual unselected-action diagnostics, confidence intervals, the pair-JAX solver, or the final four-way comparison.
 
 Generated experiment data belongs under `outputs/`, which is ignored.

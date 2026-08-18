@@ -36,7 +36,10 @@ class DeterministicStepRecord(NamedTuple):
     edge_actions_v_t: jax.Array
     edge_payoffs_u_t: jax.Array
     edge_payoffs_v_t: jax.Array
+    payoff_sums_t: jax.Array
+    payoff_square_sums_t: jax.Array
     rewards_t: jax.Array
+    selected_q_t: jax.Array
     selected_velocities_t: jax.Array
     q_t_plus_1: jax.Array
     edge_states_t_plus_1: jax.Array
@@ -55,10 +58,26 @@ class StepRecord(NamedTuple):
     edge_state_proportions_t_plus_1: jax.Array
 
 
+class InstrumentedStepRecord(NamedTuple):
+    """Lean Phase 3A source-time record with agent-level payoff sums."""
+
+    q_t: jax.Array
+    action_probabilities_t: jax.Array
+    actions_t: jax.Array
+    selected_q_t: jax.Array
+    rewards_t: jax.Array
+    selected_velocities_t: jax.Array
+    payoff_sums_t: jax.Array
+    payoff_square_sums_t: jax.Array
+    q_t_plus_1: jax.Array
+    edge_state_proportions_t: jax.Array
+    edge_state_proportions_t_plus_1: jax.Array
+
+
 class SimulationResult(NamedTuple):
     final_state: ABMState
     final_key: jax.Array
-    records: StepRecord
+    records: StepRecord | InstrumentedStepRecord
 
 
 def action_probabilities(q_values: jax.Array, tau) -> jax.Array:
@@ -123,6 +142,9 @@ def step_given_actions(
     reward_sums = jnp.zeros((graph.num_agents,), dtype=q_t.dtype)
     reward_sums = reward_sums.at[edge_u].add(payoff_u)
     reward_sums = reward_sums.at[edge_v].add(payoff_v)
+    payoff_square_sums = jnp.zeros((graph.num_agents,), dtype=q_t.dtype)
+    payoff_square_sums = payoff_square_sums.at[edge_u].add(payoff_u * payoff_u)
+    payoff_square_sums = payoff_square_sums.at[edge_v].add(payoff_v * payoff_v)
     rewards = reward_sums / jnp.asarray(graph.num_agents - 1, dtype=q_t.dtype)
 
     agent_indices = jnp.arange(graph.num_agents, dtype=jnp.int32)
@@ -143,7 +165,10 @@ def step_given_actions(
         edge_actions_v_t=edge_actions_v,
         edge_payoffs_u_t=payoff_u,
         edge_payoffs_v_t=payoff_v,
+        payoff_sums_t=reward_sums,
+        payoff_square_sums_t=payoff_square_sums,
         rewards_t=rewards,
+        selected_q_t=selected_q,
         selected_velocities_t=velocities,
         q_t_plus_1=q_t_plus_1,
         edge_states_t_plus_1=edge_states_t_plus_1,
@@ -168,16 +193,63 @@ def stochastic_step(
 ) -> tuple[ABMState, jax.Array, StepRecord]:
     """Sample actions from Q_t, then apply the deterministic old-state core."""
 
+    next_state, next_key, probabilities_t, debug = _stochastic_step_components(
+        state, key, graph, alpha, tau
+    )
+    record = StepRecord(
+        q_t=debug.q_t,
+        action_probabilities_t=probabilities_t,
+        actions_t=debug.actions_t,
+        rewards_t=debug.rewards_t,
+        selected_velocities_t=debug.selected_velocities_t,
+        q_t_plus_1=debug.q_t_plus_1,
+        edge_state_proportions_t=_edge_state_proportions(
+            debug.edge_states_t, debug.q_t.dtype
+        ),
+        edge_state_proportions_t_plus_1=_edge_state_proportions(
+            debug.edge_states_t_plus_1, debug.q_t.dtype
+        ),
+    )
+    return next_state, next_key, record
+
+
+def _stochastic_step_components(
+    state: ABMState,
+    key: jax.Array,
+    graph: CompleteGraph,
+    alpha,
+    tau,
+):
+    """Share the exact key/action/dynamics path between record variants."""
+
     action_key, next_key = jax.random.split(key)
     probabilities_t = action_probabilities(state.q_values, tau)
     actions_t = sample_actions(action_key, state.q_values, tau)
     next_state, debug = step_given_actions(state, actions_t, graph, alpha)
-    record = StepRecord(
+    return next_state, next_key, probabilities_t, debug
+
+
+def stochastic_step_instrumented(
+    state: ABMState,
+    key: jax.Array,
+    graph: CompleteGraph,
+    alpha,
+    tau,
+) -> tuple[ABMState, jax.Array, InstrumentedStepRecord]:
+    """Run the same stochastic step while retaining Phase 3A agent moments."""
+
+    next_state, next_key, probabilities_t, debug = _stochastic_step_components(
+        state, key, graph, alpha, tau
+    )
+    record = InstrumentedStepRecord(
         q_t=debug.q_t,
         action_probabilities_t=probabilities_t,
-        actions_t=actions_t,
+        actions_t=debug.actions_t,
+        selected_q_t=debug.selected_q_t,
         rewards_t=debug.rewards_t,
         selected_velocities_t=debug.selected_velocities_t,
+        payoff_sums_t=debug.payoff_sums_t,
+        payoff_square_sums_t=debug.payoff_square_sums_t,
         q_t_plus_1=debug.q_t_plus_1,
         edge_state_proportions_t=_edge_state_proportions(
             debug.edge_states_t, debug.q_t.dtype
@@ -224,6 +296,41 @@ def simulate(
 simulate_jit = partial(jax.jit, static_argnames=("steps",))(simulate)
 
 
+def simulate_instrumented(
+    initial_state: ABMState,
+    initial_key: jax.Array,
+    graph: CompleteGraph,
+    alpha,
+    tau,
+    *,
+    steps: int,
+) -> SimulationResult:
+    """Run a trajectory retaining only agent-level Phase 3A instrumentation."""
+
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+        raise ValueError("steps must be a non-negative integer")
+
+    def body(carry, _):
+        state, key = carry
+        next_state, next_key, record = stochastic_step_instrumented(
+            state, key, graph, alpha, tau
+        )
+        return (next_state, next_key), record
+
+    (final_state, final_key), records = jax.lax.scan(
+        body,
+        (initial_state, initial_key),
+        xs=None,
+        length=steps,
+    )
+    return SimulationResult(final_state=final_state, final_key=final_key, records=records)
+
+
+simulate_instrumented_jit = partial(jax.jit, static_argnames=("steps",))(
+    simulate_instrumented
+)
+
+
 def simulate_debug(
     initial_state: ABMState,
     initial_key: jax.Array,
@@ -266,3 +373,25 @@ def simulate_batch(
 
 
 simulate_batch_jit = partial(jax.jit, static_argnames=("steps",))(simulate_batch)
+
+
+def simulate_instrumented_batch(
+    initial_states: ABMState,
+    initial_keys: jax.Array,
+    graph: CompleteGraph,
+    alpha,
+    tau,
+    *,
+    steps: int,
+) -> SimulationResult:
+    """Vmap independent instrumented trajectories while preserving the run axis."""
+
+    run = lambda state, key: simulate_instrumented(
+        state, key, graph, alpha, tau, steps=steps
+    )
+    return jax.vmap(run)(initial_states, initial_keys)
+
+
+simulate_instrumented_batch_jit = partial(jax.jit, static_argnames=("steps",))(
+    simulate_instrumented_batch
+)

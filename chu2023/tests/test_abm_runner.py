@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 
 import jax
 import jax.numpy as jnp
@@ -51,6 +52,83 @@ def test_resource_budget_counts_zero_step_state_and_records_overrides() -> None:
     )
     assert overridden["allow_expensive"] is True
     assert overridden["violations_overridden"]
+
+
+def test_default_resource_estimate_matches_committed_phase2_values() -> None:
+    abm = ABMConfig(num_agents=3, steps=2, num_runs=4, dtype="float32")
+    budget = runner.validate_resource_budget(
+        abm,
+        permissive_declared_limits(),
+        False,
+    )
+
+    assert budget["record_mode"] == runner.RESOURCE_MODE_BASELINE
+    assert budget["values"]["record_bytes"] == 1_016
+    assert budget["values"]["state_working_bytes"] == 720
+    assert sum(
+        budget["record_layout"]["agent_float_fields_per_run_step"].values()
+    ) == 8
+    assert (
+        budget["record_layout"]["committed_agent_float_allowance_per_run_step"]
+        == 1
+    )
+    assert budget["record_layout"]["additional_record_fields"] == []
+    assert budget["record_layout"]["additional_working_fields"] == []
+
+
+def test_instrumented_resource_estimate_adds_only_phase3a_agent_fields() -> None:
+    abm = ABMConfig(num_agents=3, steps=2, num_runs=4, dtype="float32")
+    baseline = runner.validate_resource_budget(
+        abm,
+        permissive_declared_limits(),
+        False,
+    )
+    instrumented = runner.validate_resource_budget(
+        abm,
+        permissive_declared_limits(),
+        False,
+        record_mode=runner.RESOURCE_MODE_INSTRUMENTED,
+    )
+
+    assert instrumented["values"]["record_bytes"] == 1_304
+    assert instrumented["values"]["state_working_bytes"] == 816
+    assert instrumented["values"]["record_bytes"] - baseline["values"][
+        "record_bytes"
+    ] == 4 * 2 * 3 * 3 * np.dtype(np.float32).itemsize
+    assert instrumented["values"]["state_working_bytes"] - baseline["values"][
+        "state_working_bytes"
+    ] == 4 * 2 * 3 * np.dtype(np.float32).itemsize
+    assert instrumented["record_layout"]["additional_record_fields"] == [
+        "selected_q_t",
+        "payoff_sums_t",
+        "payoff_square_sums_t",
+    ]
+    assert instrumented["record_layout"]["agent_float_fields_per_run_step"][
+        "selected_q_t"
+    ] == 1
+
+
+@pytest.mark.parametrize("record_mode", ["ambiguous", None, ["baseline"]])
+def test_invalid_resource_mode_is_rejected(record_mode) -> None:
+    with pytest.raises(ValueError, match="record_mode"):
+        runner.validate_resource_budget(
+            ABMConfig(num_agents=3, steps=2, num_runs=1),
+            permissive_declared_limits(),
+            False,
+            record_mode=record_mode,
+        )
+
+
+def test_committed_phase2_sized_limit_still_accepts_baseline() -> None:
+    abm = ABMConfig(num_agents=3, steps=2, num_runs=4, dtype="float32")
+    safety = permissive_declared_limits()
+    safety["max_record_bytes"] = 1_016
+    safety["max_state_working_bytes"] = 720
+
+    budget = runner.validate_resource_budget(abm, safety, False)
+
+    assert budget["violations_overridden"] == []
+    assert budget["record_mode"] == runner.RESOURCE_MODE_BASELINE
 
 
 def test_zero_step_chronology_has_no_negative_final_step() -> None:
@@ -234,6 +312,11 @@ def _write_timing_outputs(
     run_directory.mkdir()
     monkeypatch.setattr(runner, "implementation_source_hashes", lambda path: {})
     monkeypatch.setattr(runner, "git_text", lambda *args: "test")
+    resource_budget = runner.validate_resource_budget(
+        abm,
+        permissive_declared_limits(),
+        False,
+    )
     runner.write_outputs(
         run_directory,
         runner.DEFAULT_CONFIG,
@@ -242,7 +325,7 @@ def _write_timing_outputs(
         learning,
         initialization,
         result,
-        {},
+        resource_budget,
     )
     with (run_directory / "state_trajectory.csv").open(newline="") as file:
         rows = list(csv.DictReader(file))
@@ -307,6 +390,13 @@ def test_zero_step_runner_reports_initialized_state_without_phantom_update(
     assert len(rows) == 1
     assert rows[0]["chronology"] == "Q_0,S_0 initial/final state; no steps executed"
     _assert_reported_final_matches_state(result, rows[0], trajectory)
+
+    with (tmp_path / "timing-0" / "metadata.json").open() as file:
+        metadata = json.load(file)
+    recorded_budget = metadata["resource_budget"]
+    assert recorded_budget["record_mode"] == runner.RESOURCE_MODE_BASELINE
+    assert recorded_budget["record_layout"]["additional_record_fields"] == []
+    assert "payoff_sums_t" not in metadata["array_shapes"]
 
 
 def test_one_step_runner_reports_post_step_final_state(

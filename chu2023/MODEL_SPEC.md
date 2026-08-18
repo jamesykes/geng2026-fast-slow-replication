@@ -646,6 +646,28 @@ For pair-theory bin comparisons, retain the distinction between:
 
 The first targets an average of local exact-Q variances; the second matches a pooled finite-bin edge distribution and includes between-Q variation of the conditional mean. Both can be useful, but they must not be interchanged. Initial results must include bin-refinement checks and avoid conclusions driven by poorly populated or overly wide bins.
 
+### 21.1 Phase 3A implemented observation and bin conventions
+
+Phase 3A implements the realised selected-action sample only. At source time `t`, every focal agent contributes exactly one observation to the stratum for its realised `A_t^i`; no zero is inserted for the unselected coordinate. The retained scan fields are `Q_t`, selected action, selected `Q_t(A_t^i)`, reward, selected-coordinate velocity, `S1`, and `S2`. Run and source-time remain explicit array axes, and the focal-agent axis is reduced only when forming the configured strata. Counterfactual diagnostics for the unselected focal action remain a later Phase 3 extension.
+
+The instrumented scan obtains `S1` and `S2` from the same old-state, oriented endpoint payoffs already used for the reward. It retains only agent-sized arrays with shapes `(R,T,n)` (or `(R,T,n,2)` for complete Q/policy arrays), never an `(R,T,E)` payoff history. It uses the same action key and deterministic transition as the uninstrumented scan and consumes no additional randomness.
+
+For a stratum with `K` selected-action observations, Phase 3A stores common population-moment sums and calculates
+
+```text
+mu  = sum_i S1_i / (K N),
+m2  = sum_i S2_i / (K N),
+m11 = sum_i (S1_i^2-S2_i) / (K N(N-1)),
+```
+
+with `sigma^2=m2-mu^2` and `c=m11-mu^2`. Empty estimates are missing rather than zero. For `n=2`, `m11` and `c` are explicitly undefined and the decomposed reward variance contains only `sigma^2/N`.
+
+Two-dimensional bins are left-closed and right-open on both coordinates, except that the final bin includes its upper edge. Configured edges are retained in float64 for provenance. Classification converts them to the Q-observation dtype and revalidates finiteness and strict increase; edges that collapse in float32 are a configuration error. A value equal to the effective final upper endpoint is included, while the immediately adjacent representable value outside either effective endpoint raises. Observations are never clipped or silently discarded. CSV and metadata distinguish configured edges from effective comparison edges. Every run/time/bin/action cell retains its count plus explicit empty, underpopulated, minimum-count, and distinct-covariance validity flags. Population moments use `ddof=0`. Independent runs remain separate and are not pooled as though agents within one complete network were independent uncertainty replicates.
+
+The Phase 3A diagnostic derives `Bc` and `Bd` from raw parsed sequence lengths and preflights dense statistic resources before constructing `QBinSpec` or any NumPy edge array, graph, initialization, simulation, aggregation, or output. It does not claim to guard memory already used by the TOML parser's Python lists. With `S=R*T*Bc*Bd*2` strata and `O=R*T*n` agent observations, the estimate includes `88S` bytes for one int64 count plus ten float64 sufficient sums; observation-dtype host fields and five `intp` indices over `O`; five float64 product arrays (`40O`); five float64 conversion arrays (`40O`) for float32 observations only, because float64 conversions alias the host fields; fourteen returned float64 moments, four boolean masks, four non-returned float64 derivation intermediates, three float64 expression-work arrays; and configured/effective NumPy bin-edge storage even when `T=0`. CSV rows are streamed, so export creates no additional stratum-scaled collection and emits exactly `S` rows. Fixed normal-run caps are 1,000,000 strata, 256 MiB estimated peak statistic bytes, and 250,000 output rows; only the explicit recorded `--allow-expensive` flag bypasses them.
+
+The shared Phase 2 resource guard defaults to its committed baseline accounting and does not claim Phase 3A arrays. The Phase 3A diagnostic explicitly selects instrumented accounting, adding exactly `selected_q_t`, `payoff_sums_t`, and `payoff_square_sums_t` to retained agent records and the two live S1/S2 accumulators to working memory.
+
 ## 22. Required initial variance comparisons
 
 The initial comparison has four separate checks:

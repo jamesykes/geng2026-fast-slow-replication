@@ -66,6 +66,61 @@ SAFETY_CONFIG_KEYS = {
     "record_bytes": "max_record_bytes",
     "state_working_bytes": "max_state_working_bytes",
 }
+RESOURCE_MODE_BASELINE = "baseline"
+RESOURCE_MODE_INSTRUMENTED = "instrumented"
+BASELINE_RECORD_AGENT_FLOAT_FIELDS = {
+    "q_t": 2,
+    "action_probabilities_t": 2,
+    "rewards_t": 1,
+    "selected_velocities_t": 1,
+    "q_t_plus_1": 2,
+}
+BASELINE_WORKING_AGENT_FLOAT_FIELDS = {
+    "q_state_buffers": 4,
+    "action_probabilities": 2,
+    "rewards": 1,
+    "selected_velocities": 1,
+}
+INSTRUMENTED_RECORD_AGENT_FLOAT_FIELDS = {
+    "selected_q_t": 1,
+    "payoff_sums_t": 1,
+    "payoff_square_sums_t": 1,
+}
+INSTRUMENTED_WORKING_AGENT_FLOAT_FIELDS = {
+    "payoff_sums_t": 1,
+    "payoff_square_sums_t": 1,
+}
+RESOURCE_MODES = {
+    RESOURCE_MODE_BASELINE: {
+        "record_agent_float_fields": BASELINE_RECORD_AGENT_FLOAT_FIELDS,
+        # The committed Phase 2 guard included one conservative float-width
+        # allowance beyond the eight explicitly retained floating fields.
+        "committed_record_float_allowance": 1,
+        "working_agent_float_fields": BASELINE_WORKING_AGENT_FLOAT_FIELDS,
+        "additional_record_fields": [],
+        "additional_working_fields": [],
+    },
+    RESOURCE_MODE_INSTRUMENTED: {
+        # InstrumentedStepRecord adds three (R,T,n) floating arrays:
+        # selected_q_t, payoff_sums_t, and payoff_square_sums_t.  Computing
+        # S1/S2 also keeps two additional agent-sized floating accumulators live.
+        "record_agent_float_fields": {
+            **BASELINE_RECORD_AGENT_FLOAT_FIELDS,
+            **INSTRUMENTED_RECORD_AGENT_FLOAT_FIELDS,
+        },
+        "committed_record_float_allowance": 1,
+        "working_agent_float_fields": {
+            **BASELINE_WORKING_AGENT_FLOAT_FIELDS,
+            **INSTRUMENTED_WORKING_AGENT_FLOAT_FIELDS,
+        },
+        "additional_record_fields": [
+            "selected_q_t",
+            "payoff_sums_t",
+            "payoff_square_sums_t",
+        ],
+        "additional_working_fields": ["payoff_sums_t", "payoff_square_sums_t"],
+    },
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,21 +154,36 @@ def validate_resource_budget(
     abm: ABMConfig,
     safety: dict,
     allow_expensive: bool,
+    *,
+    record_mode: str = RESOURCE_MODE_BASELINE,
 ) -> dict:
     """Reject expensive work before graph or batched state allocation."""
 
+    if not isinstance(record_mode, str) or record_mode not in RESOURCE_MODES:
+        valid = ", ".join(sorted(RESOURCE_MODES))
+        raise ValueError(f"record_mode must be one of: {valid}")
+    layout = RESOURCE_MODES[record_mode]
+    record_agent_float_scalars = sum(layout["record_agent_float_fields"].values())
+    record_agent_float_scalars += layout["committed_record_float_allowance"]
+    working_agent_float_scalars = sum(
+        layout["working_agent_float_fields"].values()
+    )
+
     edge_count = abm.edge_count
     run_step_edges = abm.num_runs * abm.steps * edge_count
-    # Each lean record retains 9 agent scalars plus four state-summary scalars.
+    # The baseline widths are the committed Phase 2 guard semantics.  The
+    # instrumented mode adds the three explicit Phase 3A record fields above.
     item_bytes = np.dtype(abm.dtype).itemsize
     record_bytes = abm.num_runs * abm.steps * (
-        9 * abm.num_agents * item_bytes + abm.num_agents + 4 * item_bytes
+        record_agent_float_scalars * abm.num_agents * item_bytes
+        + abm.num_agents
+        + 4 * item_bytes
     )
     # Conservative live-state/one-step estimate, including shared graph endpoints,
     # two state buffers, edge actions/payoffs, and agent-sized temporaries.
     state_working_bytes = 2 * edge_count * np.dtype(np.int32).itemsize
     state_working_bytes += abm.num_runs * (
-        8 * abm.num_agents * item_bytes
+        working_agent_float_scalars * abm.num_agents * item_bytes
         + 2 * abm.num_agents
         + edge_count * (4 * item_bytes + 8)
     )
@@ -144,6 +214,24 @@ def validate_resource_budget(
         )
     return {
         "allow_expensive": allow_expensive,
+        "record_mode": record_mode,
+        "record_layout": {
+            "agent_float_fields_per_run_step": layout[
+                "record_agent_float_fields"
+            ],
+            "committed_agent_float_allowance_per_run_step": layout[
+                "committed_record_float_allowance"
+            ],
+            "agent_float_scalars_per_run_step": record_agent_float_scalars,
+            "agent_int8_scalars_per_run_step": 1,
+            "state_summary_float_scalars_per_run_step": 4,
+            "additional_record_fields": layout["additional_record_fields"],
+            "working_agent_float_fields_per_run": layout[
+                "working_agent_float_fields"
+            ],
+            "working_agent_float_scalars_per_run": working_agent_float_scalars,
+            "additional_working_fields": layout["additional_working_fields"],
+        },
         "values": values,
         "configured_limits": configured,
         "absolute_limits": PHASE2_ABSOLUTE_LIMITS,

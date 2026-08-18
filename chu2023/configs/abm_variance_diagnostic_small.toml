@@ -1,0 +1,34 @@
+[model]
+alpha = 0.4
+tau = 2.0
+
+[simulation]
+num_agents = 8
+steps = 4
+num_runs = 3
+abm_seed = 20230819
+dtype = "float32"
+
+[initial_condition]
+mode = "grid_matched"
+histogram_seed = 20230818
+q_min = -0.1
+q_max = 1.2
+spacing = 0.1
+samples_per_grid_cell = 10
+
+[bins]
+q_c_edges = [-0.1, 0.3, 0.7, 1.2]
+q_d_edges = [-0.1, 0.3, 0.7, 1.2]
+min_count = 2
+
+[output]
+run_name = "phase3a-variance-cpu-small"
+
+[safety]
+max_agents = 128
+max_steps = 500
+max_runs = 32
+max_run_step_edges = 20000000
+max_record_bytes = 268435456
+max_state_working_bytes = 268435456
