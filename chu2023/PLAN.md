@@ -18,7 +18,7 @@ D_j(q,t) = Var[v_j^i | Q_t^i=q, A_t^i=a_j]
 
 The first version will measure distinct-opponent covariance from the ABM and will treat `c_j=0` only as an explicitly labelled conditional-independence pair closure. It will not implement a triplet closure or substitute an unconditional action-mixture variance for `D_j(q,t)`.
 
-The original paper and `case2_1.py` remain immutable provenance artifacts. Phase 1 is now implemented; JAX, the ABM, GPU transport, Q-bin estimators, bootstrap intervals, and full variance experiments remain future work.
+The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1 and 2 are implemented; GPU pair transport, Q-bin/covariance instrumentation, bootstrap intervals, and full variance experiments remain future work.
 
 ## 2. Proposed repository structure
 
@@ -165,10 +165,12 @@ Exit gate:
 
 - **Met.** The authoritative model, continuous update, stable policy, grid/projection utilities, reusable seeded histogram, guarded ordered pair construction, conditional dynamics, one-edge moments, synchronous transport, observables, and diagnostics are implemented.
 - The implementation deliberately keeps the Phase 1 payoff/moment/transport oracle together in `pair_density/numpy_reference.py` for readability instead of prematurely splitting it across the later planned JAX-oriented modules.
-- Validation command: `python -m pytest -q` after installing `.[test]`; the milestone suite reports `33 passed`.
+- Validation command at the Phase 1 boundary: `python -m pytest -q` after installing `.[test]`; the milestone suite reports `37 passed`.
 - No scientific deviations from `MODEL_SPEC.md` were introduced. The unknown published histogram was not reconstructed, no full 131-point pair array was allocated, and no JAX or ABM code was started.
 
 ## 6. Phase 2 - JAX finite-population ABM
+
+Status: **complete (2026-08-18)**.
 
 Build the ABM immediately after the shared definitions and small reference tests. This is intentionally earlier than the full JAX/GPU pair transport because it is the quickest route to validating the target variance and covariance estimator.
 
@@ -202,7 +204,13 @@ Statistical ABM tests:
 
 Exit gate:
 
-- Exact small fixed-action tests pass, and seeded small stochastic runs produce stable trajectories and per-agent realised rewards/velocities before `n=1000` or large replication counts are attempted.
+- **Met.** Exact `n=2` and heterogeneous `n=3` fixed-action cases establish payoff orientation, `n-1` averaging, old-state rewards, selected continuous updates, shared actions, and synchronous transitions.
+- Grid-matched and continuous scaled-Beta modes use explicit independent JAX keys. `lax.scan`, the small Python debug path, JIT, and vmapped independent runs agree on CPU.
+- Default scan records retain Q, policies, actions, rewards, and selected velocities but no full edge histories. The guarded baseline remains far below `n=1000`.
+- The baseline applies hard pre-allocation Phase 2 caps, records any explicit override, and hashes the current implementation even when the worktree is dirty. Grid-matched initialization is guarded before histogram allocation or sampling by fixed operational caps of 5,000,000 cells, 32 MiB of `int64` counts, and 2,000,000 sample pairs; only `--allow-expensive` bypasses them.
+- Runner tests establish that `T=0` reports the initialized state without an update and that the final `Q_T,S_T` row for `T=1` is computed from the post-step final state, including mean Q, policy, and edge-state proportions.
+- Validation on 2026-08-18 used JAX/JAXLIB 0.7.2 on `cpu` with `CpuDevice(id=0)`. The 44 focused Phase 2 tests and 37 Phase 1 tests give `81 passed` in both default warnings-as-errors float32 and a fresh CPU+x64 warnings-as-errors process.
+- Exact float32 dynamics use `rtol=0` and `atol` between `2e-7` and `3e-7`; the x64 tolerance is `1e-12`. Policy parity uses `rtol=1e-6`, and statistical tolerances are declared beside each sampling test.
 
 ## 7. Phase 3 - ABM variance and covariance instrumentation
 
@@ -402,16 +410,20 @@ Secondary/future objects must remain outside first-version deliverables:
 - long-time diffusion/Fokker-Planck approximations;
 - kernel or local-regression estimators unless binning diagnostics require them.
 
-## 13. Proposed test commands once the scaffold exists
+## 13. Current and future validation commands
 
-These commands are targets for the later implementation; they do not exist yet:
+The Phase 1 and Phase 2 commands now exist; later-phase commands remain targets:
 
 ```bash
 python -m pytest -q
-python -m pytest -q tests/test_model.py tests/test_abm_one_step.py
+python -m pytest -q tests/test_abm_graph.py tests/test_abm_one_step.py tests/test_abm_sampling.py tests/test_abm_simulation.py tests/test_abm_runner.py
+PYTHONWARNINGS=error python -m pytest -q
+JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
+python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
+
+# Later phases:
 python -m pytest -q tests/test_velocity_variance.py tests/test_conditioning.py
 python -m pytest -q tests/test_pair_one_step.py tests/test_pair_reward_moments.py
-JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q -m "not gpu and not slow"
 python experiments/validate_abm_variance.py --config configs/variance_small.toml
 python experiments/reproduce_case2_1.py --config configs/case2_1_small.toml
 python experiments/benchmark_pair_gpu.py --config configs/case2_1_full_f32.toml

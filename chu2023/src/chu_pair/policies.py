@@ -6,6 +6,15 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 
+def _two_action_boltzmann_probabilities(q_array, tau, array_namespace):
+    """Backend-neutral stable policy kernel for NumPy and JAX arrays."""
+
+    logit = tau * (q_array[..., 0] - q_array[..., 1])
+    cooperate = array_namespace.exp(-array_namespace.logaddexp(0.0, -logit))
+    defect = 1.0 - cooperate
+    return array_namespace.stack((cooperate, defect), axis=-1)
+
+
 def boltzmann_probabilities(q: ArrayLike, tau: float) -> NDArray[np.float64]:
     """Stable two-action Boltzmann probabilities in action order (C, D)."""
 
@@ -17,8 +26,4 @@ def boltzmann_probabilities(q: ArrayLike, tau: float) -> NDArray[np.float64]:
     if not np.all(np.isfinite(q_array)):
         raise ValueError("q must contain only finite values")
 
-    logit = tau * (q_array[..., 0] - q_array[..., 1])
-    cooperate = np.exp(-np.logaddexp(0.0, -logit))
-    defect = 1.0 - cooperate
-    return np.stack((cooperate, defect), axis=-1)
-
+    return _two_action_boltzmann_probabilities(q_array, tau, np)

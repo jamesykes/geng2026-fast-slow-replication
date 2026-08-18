@@ -8,7 +8,9 @@
 - Pair arrays store probability mass with axes `(q1_C, q1_D, state, q2_C, q2_D)`; do not multiply sums by grid spacing.
 - ABM Q-updates are continuous. Nearest-grid projection is only for pair-density transport.
 - Use small grids in ordinary tests. Never run the original full-grid script as a test.
-- Do not add JAX/GPU or ABM implementation during the Phase 1 milestone.
+- The Phase 2 ABM uses one packed state per undirected edge and one action per agent per step.
+- Keep scan records agent-sized; edge payoffs may appear only in one-step debug records.
+- Do not add Phase 3 S1/S2 covariance statistics, Q bins, pair-JAX transport, or GPU benchmarks yet.
 
 Commands:
 
@@ -16,5 +18,7 @@ Commands:
 python -m pip install -e ".[test]"
 python -m pytest -q
 python -m pytest -q tests/test_pair_transport.py tests/test_pair_moments.py
+python -m pytest -q tests/test_abm_graph.py tests/test_abm_one_step.py tests/test_abm_sampling.py tests/test_abm_simulation.py tests/test_abm_runner.py
+JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
+python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
 ```
-

@@ -91,7 +91,13 @@ def selected_coordinate_velocity(
     if not math.isfinite(reward):
         raise ValueError("reward must be finite")
     action_index = int(Action(action))
-    return float(alpha * (float(reward) - q_array[action_index]))
+    return float(q_learning_velocity(q_array[action_index], float(reward), alpha))
+
+
+def q_learning_velocity(chosen_q, reward, alpha):
+    """Backend-neutral selected-coordinate increment ``alpha * (reward - Q)``."""
+
+    return alpha * (reward - chosen_q)
 
 
 def continuous_selected_update(
