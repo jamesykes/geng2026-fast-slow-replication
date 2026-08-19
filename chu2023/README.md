@@ -1,6 +1,6 @@
 # Chu et al. pair-approximation numerics
 
-This self-contained subproject preserves the original `case2_1.py` calculation and develops independently tested numerical components for the model in Chu et al. Phases 1 and 2 provide shared model semantics, a readable small-grid NumPy pair-mass reference, and a finite-population JAX agent-based simulation. Phase 3A adds selected-action ABM variance instrumentation and two-dimensional Q-bin moment estimators. Pair-JAX transport, counterfactual diagnostics, uncertainty intervals, and final variance comparisons remain later phases.
+This self-contained subproject preserves the original `case2_1.py` calculation and develops independently tested numerical components for the model in Chu et al. Phases 1 and 2 provide shared model semantics, a readable small-grid NumPy pair-mass reference, and a finite-population JAX agent-based simulation. Phase 3A adds selected-action ABM variance instrumentation and two-dimensional Q-bin moment estimators. Phase 3B adds independent-run bootstrap intervals and nested Q-bin refinement diagnostics. Pair-JAX transport, counterfactual diagnostics, and final variance comparisons remain later phases.
 
 The scientific and numerical conventions are specified in `MODEL_SPEC.md`; staged work and validation gates are in `PLAN.md`. The original paper and `case2_1.py` are provenance artifacts and must not be edited.
 
@@ -76,6 +76,34 @@ Run the small CPU diagnostic with:
 python experiments/run_abm_variance_diagnostic.py --config configs/abm_variance_diagnostic_small.toml
 ```
 
-It writes `binned_moments.csv` and reproducibility/formula metadata beneath ignored `outputs/abm_variance/`. The current milestone has 28 focused Phase 3A tests and 115 tests in the complete suite. It does not implement counterfactual unselected-action diagnostics, confidence intervals, the pair-JAX solver, or the final four-way comparison.
+It writes `binned_moments.csv` and reproducibility/formula metadata beneath ignored `outputs/abm_variance/`. Phase 3A has 28 focused tests. It does not implement counterfactual unselected-action diagnostics, the pair-JAX solver, or the final four-way comparison.
+
+## Phase 3B uncertainty and refinement diagnostic
+
+Phase 3B pools the Phase 3A per-run sufficient sums across independent runs before applying the nonlinear moment formulas. This is an observation-weighted conditional estimate, not an unweighted average of run-level variances. Uncertainty is obtained by resampling complete runs: one reproducible `(B,R)` int32 multiplicity matrix is used for every time, bin, action, estimand, and refinement scheme, without consuming a JAX simulation key. Intervals are pointwise percentile intervals using NumPy's `linear` quantile method.
+
+An interval is emitted only when the original stratum contains observations from at least two independent runs and at least `max(2, ceil(0.8 B))` bootstrap estimates are finite. Otherwise its endpoints remain `NaN`, with valid/invalid replicate counts and an explicit validity flag. These checks prevent empty or single-run strata from receiving plausible-looking intervals; they do not establish scientific coverage for the small smoke configuration.
+
+Configured refinement schemes must share outer bounds and each successor must strictly refine both Q coordinates. Nesting is checked in configured float64 edges and in effective observation-dtype edges. Bins retain Phase 3A `[lower,upper)` semantics with the final upper endpoint included. Parent counts reconstruct exactly from child bins. Per-field bounds first follow payoff, scatter, reward, Q, velocity, and host-product arithmetic in the original observation dtype and then apply `gamma_k=k*epsilon/(1-k*epsilon)` to parent/child reconstruction in the actual sufficient-array summation dtype. Here `epsilon=numpy.finfo(dtype).eps` is machine epsilon, used conservatively in place of the smaller round-to-nearest unit roundoff. The actual represented `S1**2-S2` expression receives an additive bound even when `n=2`. This handles cancellation without accepting material corruption; both dtypes, maximum differences, and applied reconstruction allowances are saved in metadata. Anchors use the same assignment rule and report configured/effective bounds and widths at every level. No monotonic trend across bin widths is assumed.
+
+The finite-bin output includes both
+
+```text
+Var(v) - alpha^2 Var(reward)
+```
+
+and its exact equivalent `alpha^2[Var(selected Q)-2 Cov(reward,selected Q)]`. Thus `alpha^2 Var(reward)` is not labelled as the exact velocity variance of a finite-width bin.
+
+Run the bounded smoke diagnostic with:
+
+```bash
+python experiments/run_abm_uncertainty_diagnostic.py --config configs/abm_uncertainty_smoke.toml
+```
+
+It runs the ABM once, aggregates schemes sequentially, processes bootstrap strata in bounded chunks, streams CSV rows, and writes pooled intervals, anchor diagnostics, metadata, and the exact bootstrap run weights beneath ignored `outputs/abm_uncertainty/`.
+
+Before `QBinSpec`, graph construction, simulation, aggregation, bootstrap allocation, or output creation, the runner uses raw Python sequence lengths and Python-integer arithmetic to estimate every scheme. If `C_l=T*Bc_l*Bd_l*2`, it accounts for `88R*C_l` bytes of per-run sufficient statistics; configured/effective edge arrays; Phase 3A's dtype-aware observation aggregation work; an int32 `4BR` weight matrix and its generation/float64-processing lifetimes; retained `445*sum_l C_l` point/interval summaries; `260*max_l C_l` pooled-point derivation work; and `280*B*K` bootstrap work for chunk width `K`. Unweighted point pooling directly reduces the run axis in int64/float64, so it retains no `R`-length weights or conversion. Sequential reconstruction retains at most adjacent parent/child sufficient arrays and a conservative `112R*C_l` allowance for indexed values/counts, count conversions, field scales, gamma/error arrays, reduction, and comparison work. Output accounting adds up to 16 MiB for chunked weight serialization and 40 bytes per effective edge converted to JSON-ready Python storage, reuses the parser's configured-edge lists, and hashes weights through a non-copying memory view. The Phase 3B caps cover total per-run strata, pooled and anchor rows, weight bytes, chunk work, and the conservative host-statistics peak; the separate Phase 2 instrumented guard covers JAX records and simulation work. Configuration cannot weaken either set of limits; only recorded `--allow-expensive` can override violations.
+
+Phase 3B has 38 focused tests: 37 pass with one x64-only regression skipped in the default float32 process, and all 38 pass in a CPU+x64 process. The complete suite collects 153 tests: 152 pass with that one skip by default, and all 153 pass with CPU+x64 enabled. Counterfactual unselected-action statistics, focal-agent resampling, the pair-JAX solver, final pair/ABM comparison, and production-scale inference remain future work.
 
 Generated experiment data belongs under `outputs/`, which is ignored.

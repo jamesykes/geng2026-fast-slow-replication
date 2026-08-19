@@ -668,6 +668,87 @@ The Phase 3A diagnostic derives `Bc` and `Bd` from raw parsed sequence lengths a
 
 The shared Phase 2 resource guard defaults to its committed baseline accounting and does not claim Phase 3A arrays. The Phase 3A diagnostic explicitly selects instrumented accounting, adding exactly `selected_q_t`, `payoff_sums_t`, and `payoff_square_sums_t` to retained agent records and the two live S1/S2 accumulators to working memory.
 
+### 21.2 Phase 3B implemented pooling, uncertainty, and refinement conventions
+
+Let `z=(t,B_c,B_d,j)` denote one source-time, two-dimensional Q-bin, selected-action stratum, and let run `r` retain count `K_r(z)` and the ten Phase 3A sufficient sums. The Phase 3B point estimate first calculates
+
+```text
+K(z) = sum_r K_r(z),
+U_k(z) = sum_r U_{rk}(z)
+```
+
+and only then applies the Phase 3A nonlinear population-moment formulas. It is therefore observation weighted within each conditional stratum. It is not an unweighted mean of separately calculated run-level variances, which would target a different quantity when run counts differ.
+
+For uncertainty, Phase 3B generates one local-NumPy-RNG multiplicity matrix `W` with shape `(B,R)`. Row `b` results from drawing `R` complete run indices with replacement, so every row sums to `R`. Bootstrap replicate `b` replaces every sufficient sum by `sum_r W[b,r] U_r` and recomputes all nonlinear estimands. The exact same `W` is used for all source times, bins, selected actions, estimands, and refinement schemes. Thus dependence among agents, edges, actions, times, and bins within one finite-network trajectory remains inside the resampled cluster. Bootstrap generation has a separate seed and neither consumes nor changes JAX initialization or dynamics keys.
+
+Intervals are pointwise percentile intervals. The lower and upper probabilities are `(1-confidence)/2` and `1-(1-confidence)/2`, evaluated by `numpy.quantile(..., method="linear")` on the finite bootstrap values for that estimand and stratum. An interval is valid only if the original stratum has at least two independently simulated contributing runs and at least `max(2,ceil(0.8B))` finite bootstrap replicates. The output retains total focal-observation count, contributing-run count, point estimate, both endpoints, total/valid/invalid replicate counts, and an explicit validity flag. Invalid endpoints remain `NaN`; no zero or substitute interval is fabricated. This conservative operational policy does not itself guarantee coverage, especially for the bounded smoke run.
+
+The reported pooled estimands are `mu`, `m2`, `m11`, `sigma^2`, `c`, direct and decomposed reward variance, direct and finite-bin-corrected velocity variance, `Var(selected Q)`, and `Cov(reward,selected Q)`. The output also retains both algebraically equivalent finite-bin discrepancy calculations
+
+```text
+direct Var(v) - alpha^2 direct Var(reward)
+
+alpha^2 [Var(selected Q) - 2 Cov(reward,selected Q)].
+```
+
+Agreement of these two columns is a numerical identity check. Neither column changes the exact-Q definition of `D_j`; it exposes the effect of estimating it with a finite-width bin.
+
+Several named bin schemes may be applied to one unchanged set of source-time ABM records. All schemes have identical configured outer bounds. Each successor must have more bins and contain every parent edge in both coordinates, both in configured float64 provenance and after conversion to the observation dtype. Collapsed, non-finite, ambiguous, non-nested, or differently bounded schemes are rejected. Classification remains left-closed/right-open with the final upper endpoint included. For each adjacent refinement pair, child counts must sum exactly to every parent count. Floating sufficient sums are compared with a field-specific forward-error bound because direct parent aggregation and regrouped child aggregation add the same represented terms in different orders.
+
+Two floating dtypes enter this check and must not be conflated. The observation dtype `o` is the float32 or float64 dtype in which JAX represents payoffs and computes agent-level `S1`, `S2`, rewards, selected Q values, and velocities. The summation dtype `s` is the dtype of the Phase 3A sufficient arrays and their parent/child reconstruction, currently float64. For either dtype `d`, let `epsilon_d=numpy.finfo(d).eps` be machine epsilon, not the smaller round-to-nearest unit roundoff, and define `gamma_k^d=k*epsilon_d/(1-k*epsilon_d)`. Using machine epsilon here is an intentional conservative substitution. A bound is rejected if `k*epsilon_d>=1`.
+
+Let `rho_d(x,k)` be an outward-rounded bound for `k` represented operations applied to a non-negative exact-magnitude bound `x`:
+
+```text
+rho_d(x,k) = outward[ x + gamma_k^d x + k eta_d ],
+```
+
+where `eta_d` is the smallest positive subnormal of dtype `d`. Every non-negative base sum, product, or quotient used below is also rounded outward in binary64 and overflow/non-finite bounds fail explicitly. Define `p_o` as the largest absolute payoff after casting the authoritative payoff tensor to dtype `o`, `q_o` as the largest absolute effective Q-bin endpoint, `alpha_o` as the represented absolute learning rate, and `N_o` as `N=n-1` represented in dtype `o`. The actual represented per-observation term bounds are:
+
+| Sufficient field | Actual term entering aggregation | Evaluation dtype before sufficient sum | Represented-value bound |
+|---|---|---|---|
+| `sum_s1` | scatter sum `S1=sum_h y_h` | `o` | `B1=rho_o(N p_o,N)` |
+| `sum_s2` | scatter sum `S2=sum_h fl_o(y_h*y_h)` | `o` | `B2=rho_o(N rho_o(p_o^2,1),N)` |
+| `sum_distinct_products` | `fl_s(fl_s(S1*S1)-S2)` | `s` after exact promotion to `s` | `rho_s(rho_s(B1^2,1)+B2,1)` |
+| `sum_reward` | `r=fl_o(S1/N_o)` | `o` | `Br=rho_o(B1/N_o,1)` |
+| `sum_reward_squared` | `fl_s(r*r)` | `s` | `rho_s(Br^2,1)` |
+| `sum_selected_q` | represented selected `Q_j` | `o`, then exact promotion | `Bq=q_o` |
+| `sum_selected_q_squared` | `fl_s(Q_j*Q_j)` | `s` | `rho_s(Bq^2,1)` |
+| `sum_reward_selected_q` | `fl_s(r*Q_j)` | `s` | `rho_s(Br Bq,1)` |
+| `sum_velocity` | `fl_o(alpha_o*fl_o(r-Q_j))` | `o` | `Bv=rho_o(alpha_o rho_o(Br+Bq,1),1)` |
+| `sum_velocity_squared` | `fl_s(v*v)` | `s` | `rho_s(Bv^2,1)` |
+
+The distinct-product row deliberately bounds the actual stored expression rather than only its ideal ordered-distinct interpretation `N(N-1)p^2`. In particular, when `N=1`, separately rounded `S1*S1` and `S2` need not cancel; the represented bound remains positive and includes this additive rounding residual.
+
+For one parent cell with `m` observations, child counts `m_l`, stored parent sum `P`, stored child sums `C_l`, and `L` child bins, the accepted reconstruction difference uses the summation dtype and is bounded by
+
+```text
+gamma_m A
++ sum_l gamma_{m_l} A_l
++ gamma_L [sum_l |C_l| + sum_l gamma_{m_l} A_l]
++ underflow allowance,
+```
+
+where `A=max(m*b_f,|P|)` and `A_l=max(m_l*b_f,|C_l|)`, using the table's represented term bound for `b_f`. The final allowance adds `(2m+L) eta_s` for underflow across the parent partial sum, child partial sums, and regrouping. Thus zero or cancellation-sensitive totals use a count-times-represented-value bound rather than an unsafe relative comparison, while large sums also use their actual magnitudes. Counts remain bit-exact. Metadata records both dtypes, machine epsilon, and the maximum observed difference and actually applied allowance for each field and adjacent scheme pair.
+
+Configured Q-space anchors use the same effective-edge assignment as observations. A boundary anchor belongs to the bin on its upper side, except the common final upper endpoint belongs to the final bin. Anchor output records the unique bin, configured and effective bounds and widths, count, contributing runs, point values, bootstrap intervals, validity information, and finite-bin discrepancy at every source time, selected action, and refinement level. Refinement is a bias-variance diagnostic: smaller bins reduce within-bin Q dispersion but commonly reduce counts and increase uncertainty; no monotonicity of the scientific estimates or interval widths is assumed.
+
+Phase 3B preflight occurs after TOML has produced raw Python lists but before `QBinSpec`, any NumPy edge-array copy, graph construction, initialization, simulation, aggregation, bootstrap allocation, or output construction. It does not claim the memory already consumed by those parser lists. For scheme `l`, define `C_l=T*Bc_l*Bd_l*2`, with `S_l=R*C_l`, `O=R*T*n`, bootstrap count `B`, and processing chunk `K=min(configured_chunk,max_l C_l)`. Allocation-free Python-integer arithmetic accounts for:
+
+- `88*sum_l S_l` bytes allocated over the sequential aggregations, with the simultaneous sufficient-statistic peak equal to `88` times the largest first or adjacent parent-plus-child stratum count; gamma-bound parent reconstruction additionally allows a conservative `112S_l` bytes for one indexed child field/count array, float64 count conversions, physical scales, gamma/error arrays, the reduced result, and NumPy comparison workspace;
+- configured float64 plus effective observation-dtype edges for all schemes, even at `T=0`;
+- dtype-aware Phase 3A aggregation observation/index/conversion/product work over `O`;
+- retained int32 bootstrap weights (`4BR`), their int32 draw array and small row-index vector during generation, and the simultaneously live float64 weight conversion during processing;
+- `445*sum_l C_l` bytes for retained counts, contributing-run counts, thirteen point arrays, lower/upper arrays, valid/invalid replicate arrays, and validity flags;
+- `260*max_l C_l` bytes for the unchunked pooled-point derivation of the largest scheme;
+- `280*B*K` bytes for chunked bootstrap pooled counts/sums, estimands, intermediates, and expression/quantile workspace.
+
+The output-stage peak also includes the final scheme's sufficient statistics, retained summaries, up to 16 MiB for NumPy's chunked weight serialization, and a conservative 40 bytes per effective edge converted to JSON-ready Python floats/list slots. The weight hash consumes the existing contiguous array through a byte-cast memory view and does not make a full copy. Configured metadata edges reuse the TOML parser's existing raw lists rather than making another list copy. CSV files are streamed and no all-row table is built.
+
+Unweighted point pooling uses direct `sum(axis=0,dtype=int64)` for counts and `sum(axis=0,dtype=float64)` for each sufficient field. It therefore creates no `R`-length ones vector or float64 weight conversion; metadata records zero pooled-point run-weight bytes. Explicit weighted pooling remains a separate path used for compatibility tests, while bootstrap chunks apply their common multiplicities directly.
+
+The audited Phase 3B host-statistics peak is the maximum of weight generation, aggregation, parent reconstruction, pooled-point derivation, and chunked bootstrap processing with their simultaneously retained arrays. The separate authoritative Phase 2 instrumented guard continues to cover JAX simulation records and simulation working state; metadata records both budgets rather than mislabelling their separate backend/host estimates as one measured device peak. CSV rows are streamed and do not create a stratum-sized Python collection or dataframe. Separate fixed Phase 3B caps cover total per-run strata, pooled rows, anchor rows, retained weight bytes, chunk work, and the overall estimated host-statistics peak. Input configuration cannot weaken them; only the explicit recorded `--allow-expensive` override can bypass violations.
+
 ## 22. Required initial variance comparisons
 
 The initial comparison has four separate checks:

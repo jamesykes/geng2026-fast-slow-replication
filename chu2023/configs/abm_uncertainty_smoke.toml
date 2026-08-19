@@ -1,0 +1,48 @@
+[model]
+alpha = 0.4
+tau = 2.0
+
+[simulation]
+num_agents = 8
+steps = 4
+num_runs = 6
+abm_seed = 20230819
+dtype = "float32"
+
+[initial_condition]
+mode = "grid_matched"
+histogram_seed = 20230818
+q_min = -0.1
+q_max = 1.2
+spacing = 0.1
+samples_per_grid_cell = 10
+
+[[bin_schemes]]
+name = "coarse"
+q_c_edges = [-0.1, 0.55, 1.2]
+q_d_edges = [-0.1, 0.55, 1.2]
+
+[[bin_schemes]]
+name = "fine"
+q_c_edges = [-0.1, 0.2, 0.55, 0.85, 1.2]
+q_d_edges = [-0.1, 0.2, 0.55, 0.85, 1.2]
+
+[bootstrap]
+replicates = 200
+confidence_level = 0.95
+seed = 31032023
+stratum_chunk_size = 8
+
+[anchors]
+points = [[0.2, 0.2], [0.55, 0.55], [1.2, 1.2]]
+
+[output]
+run_name = "phase3b-uncertainty-cpu-smoke"
+
+[safety]
+max_agents = 128
+max_steps = 500
+max_runs = 32
+max_run_step_edges = 20000000
+max_record_bytes = 268435456
+max_state_working_bytes = 268435456

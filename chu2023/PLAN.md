@@ -18,7 +18,7 @@ D_j(q,t) = Var[v_j^i | Q_t^i=q, A_t^i=a_j]
 
 The first version will measure distinct-opponent covariance from the ABM and will treat `c_j=0` only as an explicitly labelled conditional-independence pair closure. It will not implement a triplet closure or substitute an unconditional action-mixture variance for `D_j(q,t)`.
 
-The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1, 2, and the bounded selected-action Phase 3A instrumentation milestone are implemented; counterfactual diagnostics, GPU pair transport, bootstrap intervals, and full variance experiments remain future work.
+The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1, 2, and the bounded selected-action Phase 3A and independent-run uncertainty Phase 3B milestones are implemented; counterfactual diagnostics, GPU pair transport, and full variance experiments remain future work.
 
 ## 2. Proposed repository structure
 
@@ -276,10 +276,52 @@ Exit gate:
 - **Met.** On small CPU runs, the reward variance decomposition closes, direct realised-velocity variance is separately identified, finite-bin Q/covariance terms are visible, independent runs remain separate, and no ordered opponent-pair or time-indexed edge-payoff array is constructed.
 - The 28 focused Phase 3A tests and the associated Phase 2 resource regressions give `115 passed` in the complete default suite.
 
+### Phase 3B - independent-run uncertainty and Q-bin refinement
+
+Status: **complete (2026-08-19)**.
+
+Phase 3B reuses the unchanged Phase 3A instrumented trajectories and sufficient sums. Its pooled point estimate sums counts and raw sums across independent runs before applying nonlinear moments, so it is observation weighted rather than an unweighted average of run variances. Its sole uncertainty resampling unit is one complete independent ABM run.
+
+Implemented scope:
+
+1. Generate one reproducible int32 bootstrap multiplicity matrix `(B,R)` from a bootstrap-only NumPy seed; every row contains `R` run draws.
+2. Apply the same complete-run weights to every time, Q bin, selected action, estimand, and refinement scheme, without touching JAX keys or trajectories.
+3. Recompute all pooled nonlinear Phase 3A moments per replicate and add the two algebraically equivalent finite-bin discrepancy estimates.
+4. Form pointwise percentile intervals with `numpy.quantile(method="linear")`. Require at least two contributing runs and at least `max(2,ceil(0.8B))` finite replicates; otherwise retain `NaN` endpoints plus explicit counts and flags.
+5. Apply several named, strictly nested two-dimensional bin schemes to one simulation. Check common configured/effective bounds, strict refinement in both axes, conversion collapse, exact count reconstruction, and field-specific gamma-bound reconstruction of differently ordered floating sums.
+6. Map configured anchors with the same `[lower,upper)` and final-inclusive rule, reporting configured/effective bounds and widths, counts, point values, intervals, flags, and finite-bin discrepancy by time/action/scheme.
+7. Aggregate schemes sequentially and process bootstrap strata in bounded chunks. Never construct `B` by all-strata by all-estimands storage, a time-indexed edge-payoff history, or a stratum-sized CSV collection.
+8. Run a separate guarded smoke runner which emits streamed pooled and anchor CSV files, exact bootstrap weights, metadata, resource estimates, seeds, versions, and dirty-tree source hashes under ignored `outputs/abm_uncertainty/`.
+9. Before `QBinSpec`, simulation, aggregation, bootstrap allocation, or output, preflight all schemes using allocation-free raw-list lengths and fixed non-configurable normal-run caps. The audit includes sequential sufficient arrays, dtype-aware aggregation work, configured/effective edges at `T=0`, run weights and their conversions, retained summaries, pooled-point derivation, chunked bootstrap work, pooled rows, and anchor rows. Only recorded `--allow-expensive` may bypass violations.
+
+Phase 3B tests establish:
+
+- unequal run counts yield the hand-calculated observation-weighted pooled variance rather than a mean of run variances;
+- fixed multiplicities give manual replicate variances and linear percentile endpoints, while a correlated-within-run example differs from invalid observation-level resampling;
+- empty bootstrap replicates, one-run strata, valid/invalid replicate counts, and undefined interval endpoints follow the stated policy;
+- bootstrap seeds reproduce weights and intervals without changing points, sufficient statistics, simulation randomness, or Phase 3A trajectory guarantees;
+- chunk sizes give identical results and the derivation kernel never receives more than the configured number of strata;
+- float32 and CPU+x64 results agree within declared tolerances;
+- configured/effective nesting rejects non-nested, differently bounded, and float32-collapsed edges;
+- child counts and all ten sufficient sums reconstruct their parent, and anchors follow interior-boundary/final-upper conventions;
+- float32 represented-value bounds cover all ten actual sufficient terms, including the nonzero `S1**2-S2` rounding residual for `n=2`, and separate observation-dtype arithmetic from float64 reconstruction summation;
+- the reviewed heterogeneous `n=32, R=2, T=4, seed=19` trajectories pass in float32 and CPU+x64, while omitted, duplicated, materially corrupted, and count-corrupted child contributions still fail;
+- direct run-axis pooling matches explicit all-ones weighting without allocating either run-length weight vector, including hand-checked `T=0, R=32, B=1` float32/float64 peaks;
+- one runner simulation is reused for every scheme and the identical weight object reaches every refinement level;
+- a single original Phase 3A bin scheme recovers the committed pooled moment formulas exactly;
+- independent hand arithmetic covers every float32/float64 resource component, `T=0`, every fixed cap, override recording, guard-before-`QBinSpec` order, and rejection before simulation/aggregation/bootstrap/output;
+- streamed anchor output includes configured/effective widths and total/valid/invalid replicate information.
+
+Exit gate:
+
+- **Met.** A bounded CPU smoke run produces pooled selected-action moments, conservative complete-run bootstrap intervals, and nested-bin/anchor diagnostics from one trajectory set without claiming production coverage.
+- The 38 focused Phase 3B tests give `37 passed, 1 skipped` in the default float32 process and `38 passed` with CPU+x64 enabled. They bring the complete suite to `152 passed, 1 skipped` in default and warnings-as-errors validation and `153 passed` in CPU+x64 validation.
+
 ### Deferred Phase 3 work
 
 - Add separately labelled counterfactual `Y_ih^(C)` and `Y_ih^(D)` diagnostics and their selected-action weighting checks.
-- Add bin-refinement experiments, focal-agent clustering diagnostics, and run-level confidence intervals.
+- Add focal-agent repeated-measure diagnostics only if a scientifically justified resampling design is specified; complete runs remain the current uncertainty unit.
+- Choose production run count, bootstrap count, bin schemes, anchors, sparse-stratum thresholds, and any multiplicity-adjusted inference before scientific use.
 - Perform the final pair/ABM four-way comparison only after the JAX pair solver exists.
 
 ## 8. Phase 4 - JAX pair solver on CPU
@@ -427,14 +469,18 @@ Secondary/future objects must remain outside first-version deliverables:
 
 ## 13. Current and future validation commands
 
-The Phase 1 and Phase 2 commands now exist; later-phase commands remain targets:
+The Phase 1 through Phase 3B commands now exist; later-phase commands remain targets:
 
 ```bash
 python -m pytest -q
 python -m pytest -q tests/test_abm_graph.py tests/test_abm_one_step.py tests/test_abm_sampling.py tests/test_abm_simulation.py tests/test_abm_runner.py
+python -m pytest -q tests/test_abm_variance.py tests/test_abm_variance_runner.py
+python -m pytest -q tests/test_abm_uncertainty.py tests/test_abm_uncertainty_runner.py
 PYTHONWARNINGS=error python -m pytest -q
 JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
 python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
+python experiments/run_abm_variance_diagnostic.py --config configs/abm_variance_diagnostic_small.toml
+python experiments/run_abm_uncertainty_diagnostic.py --config configs/abm_uncertainty_smoke.toml
 
 # Later phases:
 python -m pytest -q tests/test_velocity_variance.py tests/test_conditioning.py
@@ -467,7 +513,7 @@ GPU and full-grid tests should be opt-in markers so ordinary CPU validation neve
 | Decision | Needed by |
 | --- | --- |
 | Exact seed/reference histogram for legacy regression | Full reproduction |
-| Minimum bin count, refinement schedule, and cluster interval method | Reported variance experiment |
+| Production run/bootstrap counts, bin schedule, anchors, and sparse-stratum policy | Reported variance experiment |
 | Boundary policy outside the original parameter range | General model support |
 | Production nearest/interpolated transport default | Grid convergence completion |
 | GPU model, available memory, precision, and runtime budget | Full-grid GPU run |
