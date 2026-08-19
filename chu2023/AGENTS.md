@@ -12,7 +12,8 @@
 - Keep scan records agent-sized; edge payoffs may appear only in one-step debug records.
 - Phase 3A/3B may retain selected-action `S1`/`S2`, per-run sufficient sums, and bounded bootstrap/refinement summaries only at agent/run/time/bin scale; never retain time-indexed edge-payoff histories.
 - Phase 3B uncertainty must resample complete independent runs with one common run-weight matrix across times, bins, actions, estimands, and refinement levels.
-- Do not add counterfactual unselected-action instrumentation, focal-agent resampling, pair-JAX transport, final comparison experiments, or GPU benchmarks yet.
+- The Phase 4 JAX pair solver uses internal `(state,M,M)` probability-mass arrays, exact legacy projection, bounded source chunks, and lean scan diagnostics; preserve NumPy parity.
+- Do not add counterfactual unselected-action instrumentation, focal-agent resampling, final comparison experiments, production/full-grid runs, interpolation, or GPU benchmarks yet.
 
 Commands:
 
@@ -23,8 +24,10 @@ python -m pytest -q tests/test_pair_transport.py tests/test_pair_moments.py
 python -m pytest -q tests/test_abm_graph.py tests/test_abm_one_step.py tests/test_abm_sampling.py tests/test_abm_simulation.py tests/test_abm_runner.py
 python -m pytest -q tests/test_abm_variance.py tests/test_abm_variance_runner.py
 python -m pytest -q tests/test_abm_uncertainty.py tests/test_abm_uncertainty_runner.py
+python -m pytest -q tests/test_pair_jax.py tests/test_pair_jax_runner.py
 JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
 python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
 python experiments/run_abm_variance_diagnostic.py --config configs/abm_variance_diagnostic_small.toml
 python experiments/run_abm_uncertainty_diagnostic.py --config configs/abm_uncertainty_smoke.toml
+python experiments/run_pair_jax_small.py --config configs/pair_jax_small.toml
 ```

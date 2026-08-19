@@ -1,0 +1,23 @@
+[model]
+alpha = 0.4
+tau = 2.0
+
+[grid]
+q_min = -1.0
+q_max = 1.0
+spacing = 0.5
+
+[solver]
+steps = 4
+dtype = "float32"
+chunk_size = 64
+diagnostic_stride = 1
+symmetry_tolerance = 0.000002
+diagnostic_tolerance = 0.000002
+
+[initial_condition]
+mode = "tiny_two_cell"
+state_probabilities = [0.5, 0.5]
+
+[output]
+run_name = "phase4-pair-jax-cpu-small"

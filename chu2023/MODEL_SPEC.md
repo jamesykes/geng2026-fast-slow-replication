@@ -572,6 +572,71 @@ with `c_j=0` clearly labelled as a conditional-independence closure. For the fir
 
 Pair-density evolution is independent of finite population size `n`. Once one pair trajectory has been solved for a model parameter set and initial condition, its one-edge moments can be reused to form `c_j=0` predictions for multiple values of `n`. Separate ABM simulations remain necessary for each `n`, because finite-population trajectories and `c_j` can depend on `n`.
 
+### 19.1 Phase 4 JAX pair-mass representation and chronology
+
+Phase 4 implements the Phase 1 nearest-grid oracle in JAX without changing its scientific law. Let `G` be the number of grid values per Q coordinate and `M=G^2` the number of two-coordinate agent types. The public conversion boundary is the canonical shape
+
+```text
+(q1_C, q1_D, state, q2_C, q2_D) = (G,G,2,G,G),
+```
+
+while compiled kernels use contiguous state slices
+
+```text
+p_flat.shape = (2,M,M).
+```
+
+Both endpoint axes remain ordered; endpoint exchange is `p_flat[s,u,v] = p_flat[s,v,u]`. Elements remain discrete probability masses, so no grid-spacing factor enters any sum. The JAX independent initial pair is exactly `pi_s P_u P_v`, with a configured two-state probability vector `pi`; it is an outer product rather than a correlated equal-endpoint construction.
+
+For each source mass, one JAX step performs this chronology:
+
+1. sum over old state and second endpoint to obtain `f_t(q)`;
+2. evaluate both endpoint policies from their source `Q_t` values;
+3. contract the source pair mass and opponent policy to obtain `w_t(s,b|q)`, then `mu_t`, `m2_t`, and `sigma_t^2` from the authoritative payoff tensor;
+4. compute both action-specific conditional increments `alpha[mu_j(q,t)-q_j]` for every occupied focal type;
+5. apply the active legacy decimal pre-round, nearest multiple-of-spacing search, and left-tie rule to the selected coordinate only, independently for every endpoint type and action;
+6. for every old-state ordered source pair, weight `(C,C)`, `(C,D)`, `(D,C)`, and `(D,D)` by the product of the two source policies, gather the corresponding endpoint-specific projected destinations, transition from the old state with the authoritative transition tensor, and scatter-add the mass;
+7. return the complete synchronous destination mass without clipping, interpolation, diffusion, or renormalization.
+
+The grid projection uses integer decimal ticks matching the Phase 1 compatibility implementation. Invalid or non-finite projected values and projected integer ticks outside the supported int32 representation make the destination-valid flag false; checked host entry points raise rather than using the internal safe scatter sentinel as a boundary policy. Float64 grids are rejected unless `JAX_ENABLE_X64=1` was active before JAX import, preventing a nominal float64 configuration from silently becoming float32.
+
+The source domain has `D=2M^2` cells. The implemented baseline traverses this fixed domain in source chunks of `K=min(chunk_size,D)` using `jax.lax.fori_loop`; each chunk emits four branch contributions into one flat scatter accumulator. There is no Python loop over occupied cells inside the kernel. A multi-step `jax.lax.scan` carries only the current `(2,M,M)` mass and a scalar destination-valid flag. It retains per-step state masses, mean Q, mean action probabilities, mass/symmetry/minimum diagnostics, and conditional-moment validity, but no `(T,2,M,M)` density history. `T=0` returns the unchanged initial mass and empty diagnostic arrays.
+
+The checked interfaces validate the input shape and element count before device-to-host conversion, then validate dtype, finiteness, nonnegativity, and endpoint symmetry. After stepping they reject any invalid destination and repeat mass/symmetry validation. No mass normalization occurs. Empty focal types have zero conditional weights, means, second moments, variances, and velocities; occupied types must have weights summing to one within the configured diagnostic tolerance.
+
+The guarded CPU smoke runner derives `G`, `M`, `M^2`, and `D` with Python integers before allocating a grid or JAX array. For floating item size `b`, effective chunk `K`, `T` steps and retained diagnostic-row count `R_d`, its backend-independent static allowances are
+
+```text
+device_static
+  = 8Db + [Gb + M(20b+40)] + 17Kb + 96K + T(11b+3)
+
+host_static
+  = Db + T(11b+3) + 8M + [G(16+b) + M(8+4b)]
+    + 4096 R_d + S + 1 MiB
+
+combined_static = device_static + host_static.
+```
+
+The old `3Db` device term did not cover the compiled `fori_loop`/scatter buffers and was rejected after executable analysis exceeded it on representative reduced grids. The replacement reserves eight complete device densities before adding pointwise, branch and full device-diagnostic arrays. The checked simulation retains its full `T(11b+3)` host diagnostic transfer while validating the final `Db` density copy, so both appear simultaneously in `host_static`; selected Python/CSV rows are separate. Host storage also includes histogram/grid construction, bounded normalized serialization and hashing. This is a conservative modeled pair-work requirement, not process RSS; interpreter/imported-library memory, compiler code/cache, allocator overhead and already-parsed TOML objects are recorded exclusions.
+
+`S` distinguishes encoded payload size from live serialization memory. Let `J` be the bounded ASCII length of complete normalized metadata, `C=4096` the maximum metadata chunk or CSV header/record, `U=8` bytes per retained text character, `F=8192` the explicit binary file buffer and `H=65536` fixed serializer/object overhead. Then
+
+```text
+metadata encoding peak = 3 U J + H
+metadata/CSV write peak = U J + U C + C + F + H
+S = max(metadata encoding peak, metadata/CSV write peak).
+```
+
+The tripled encoding term permits bounded input-object/string storage, temporary escaped fragments and the joined JSON text to coexist. The input metadata object is released after the checked string is produced. The write term permits the retained metadata string, one transient text chunk/record, its ASCII bytes and the file buffer to coexist. JSON and CSV stages are sequential. The factor `U=8` deliberately avoids relying on CPython's compact one-byte ASCII representation.
+
+After raw TOML parsing, the runner requires exactly the documented `model`, `grid`, `solver`, `initial_condition`, and `output` tables and keys, normalizes their bounded scalar values, and rejects unknown fields. `run_name` is at most 64 safe ASCII characters. Only this normalized configuration is serialized. Because `ensure_ascii=True` guarantees ASCII output, character count equals encoded ASCII byte count and exact validation does not create a full byte copy. A worst-case JSON-escaping calculation bounds the normalized configuration, Git status, compiled-analysis reason, at most eight bounded device descriptions, fixed metadata, and one CSV header or record. The separate `S` formula bounds live text, escaped fragments, encoded chunks and file buffers. CSV validation uses a non-retaining counting sink; final JSON and CSV are written in bounded binary chunks. All exact checks finish before output-directory creation.
+
+Only after schema validation and the static combined check accept does the runner build the small `QGrid`/JAX grid tables. It then lowers and compiles the scan from an abstract `(2,M,M)` `ShapeDtypeStruct`, before histogram or pair-density allocation. When `memory_analysis()` is complete, executable device storage is `argument + output + temporary - alias`, and executable host storage is `host_argument + host_output + host_temporary - host_alias`. The device requirement must not exceed `device_static`; adding compiled host storage and `host_static` gives the compiled combined requirement checked against the same fixed 256 MiB cap. Missing, incomplete, invalid or inconsistent backend analysis is a `compiled_analysis_unavailable` safeguard violation. Normal execution fails closed before pair allocation; only recorded `--allow-expensive` may override it, without claiming a compiled pass. Static shape caps limit compilation exposure, but compilation's own code/cache and unreported host-memory usage cannot be measured before compilation.
+
+Fixed ordinary-run limits are `M<=4096`, `M^2<=4,000,000`, `D<=8,000,000`, 64 MiB initial pair mass, 256 MiB static/compiled combined storage, zero full-density snapshots and 10,000 diagnostic rows. Input configuration cannot raise them. A recorded `--allow-expensive` may override resource violations but never shape, numerical or scientific validity checks.
+
+The JAX pair law still determines only the one-edge distribution and its `mu`, `m2`, and `sigma^2`. Phase 4 does not infer `c_j`, perform the final pair/ABM variance comparison, introduce interpolation, run the full legacy grid, or establish GPU performance or precision.
+
 ## 20. O(N) ABM moment and covariance estimator
 
 The ABM must not enumerate all ordered pairs of opponents. For one focal agent/configuration and one counterfactual focal action `j`, compute

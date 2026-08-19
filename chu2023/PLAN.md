@@ -18,7 +18,7 @@ D_j(q,t) = Var[v_j^i | Q_t^i=q, A_t^i=a_j]
 
 The first version will measure distinct-opponent covariance from the ABM and will treat `c_j=0` only as an explicitly labelled conditional-independence pair closure. It will not implement a triplet closure or substitute an unconditional action-mixture variance for `D_j(q,t)`.
 
-The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1, 2, and the bounded selected-action Phase 3A and independent-run uncertainty Phase 3B milestones are implemented; counterfactual diagnostics, GPU pair transport, and full variance experiments remain future work.
+The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1, 2, the bounded selected-action Phase 3A and independent-run uncertainty Phase 3B milestones, and the bounded CPU Phase 4 JAX pair solver are implemented; counterfactual diagnostics, production/GPU pair transport, and full variance experiments remain future work.
 
 ## 2. Proposed repository structure
 
@@ -322,9 +322,11 @@ Exit gate:
 - Add separately labelled counterfactual `Y_ih^(C)` and `Y_ih^(D)` diagnostics and their selected-action weighting checks.
 - Add focal-agent repeated-measure diagnostics only if a scientifically justified resampling design is specified; complete runs remain the current uncertainty unit.
 - Choose production run count, bootstrap count, bin schemes, anchors, sparse-stratum thresholds, and any multiplicity-adjusted inference before scientific use.
-- Perform the final pair/ABM four-way comparison only after the JAX pair solver exists.
+- Perform the final pair/ABM four-way comparison in Phase 5, now that the bounded JAX pair solver exists; do not fold it into Phase 4.
 
 ## 8. Phase 4 - JAX pair solver on CPU
+
+Status: **complete (2026-08-19) for the bounded exact-scatter CPU milestone**.
 
 Port the deterministic pair solver component by component and compare with the NumPy oracle before using a GPU.
 
@@ -334,7 +336,7 @@ Tasks:
 2. Vectorise marginals, observables, payoff matrix-vector contractions, and velocity fields.
 3. Compute `f(q,t)`, `w_sb(q,t)`, `mu_j^pair`, `m2_j^pair`, and `sigma_j,pair^2` for both actions.
 4. Implement a first correct small-array transport, even if it uses a simple flat scatter.
-5. Implement separable endpoint transport (`A_a P_s A_b^T`) with staged segment/scatter operations.
+5. Evaluate separable endpoint transport (`A_a P_s A_b^T`) as a later production optimization. The bounded milestone intentionally retains the first exact flat-scatter formulation so its chronology is transparent and independently comparable with the NumPy oracle.
 6. Add optional chunking with a pure functional accumulator and deterministic chunk-order CPU execution.
 7. JIT one step, then a short `lax.scan`; keep I/O and metadata writes outside compiled code.
 
@@ -342,15 +344,20 @@ Validation matrix:
 
 | Case | Backend/dtype | Required comparison |
 | --- | --- | --- |
-| Tiny hand case | NumPy/JAX CPU float64 | exact destinations and edge moments |
-| Reduced grid, one step | NumPy/JAX CPU float64 | full-array comparison |
-| Reduced grid, many steps | NumPy/JAX CPU float64 | full array, observables, moments, invariants |
-| Reduced grid float32 | JAX CPU float32 versus float64 | bounded moment and mass error |
+| Tiny hand cases | JAX CPU float32 | hand-derived policies, payoffs, velocities, destinations, branch masses, and transitions |
+| Reduced grid, one step | NumPy float64/JAX CPU float32 | full array, destinations, and one-edge moments within declared float32 tolerances |
+| Reduced grid, many steps | NumPy float64/JAX CPU float32 | full array, observables, moments, and invariants within declared float32 tolerances |
+| Reduced grid, many steps | NumPy/JAX CPU float64 | full-array parity with tight x64 tolerances in a fresh process |
 | Chunk sizes 1/many/all | JAX CPU | invariant, trajectory, and moment equivalence |
 
 Exit gate:
 
-- NumPy and JAX CPU agree over multi-step reduced cases, including the Q-resolved one-edge first/second moments needed by the variance project.
+- **Met.** NumPy and JAX CPU agree over one-step and four-step reduced cases, including exact projected destinations and the Q-resolved one-edge first moment, second moment, and variance needed by the variance project.
+- Independent heterogeneous SH and PD fixtures cover nonuniform source policies, asymmetric endpoint payoff orientation, distinct endpoint velocity/projection maps, all four action branches, old-state transitions, complete transported mass, and exchange symmetry.
+- The JIT-compatible implementation uses internal `(2,M,M)` mass, bounded source chunks, flat scatter-add, and `lax.scan`. It retains a lean diagnostic trajectory and no full density history. Chunk sizes one, intermediate, and all source cells agree.
+- Default float32 and strict CPU+x64 parity use separately justified tolerances. No GPU backend, full-grid run, interpolation, separable production transport, pair-derived `c_j`, or final pair/ABM comparison is claimed by this phase.
+- The runner validates an exact bounded configuration schema and serialization allowance before a conservative allocation-free static device-plus-host gate. Static host accounting includes the complete host diagnostic trajectory simultaneously with final-density validation. Serialization accounting distinguishes maximum ASCII payload from the maximum of JSON-encoding and bounded JSON/CSV-writing live peaks; validation makes no redundant full ASCII byte copy, CSV uses a non-retaining counting sink, and output uses bounded binary chunks. Shape-only compilation follows before histogram or pair allocation; complete executable analysis is required for normal execution, while unavailable/incomplete analysis fails closed unless explicit recorded `--allow-expensive` overrides it. Both resource gates share an immutable 256 MiB combined cap and scientific validity checks remain mandatory.
+- The 69 focused Phase 4 tests give `66 passed, 3 skipped` by default and `69 passed` with CPU+x64 enabled. The complete suite gives `218 passed, 4 skipped` in default warnings-as-errors validation and `222 passed` in fresh CPU+x64 warnings-as-errors validation.
 
 ## 9. Phase 5 - Initial four-way variance comparison
 
@@ -469,22 +476,23 @@ Secondary/future objects must remain outside first-version deliverables:
 
 ## 13. Current and future validation commands
 
-The Phase 1 through Phase 3B commands now exist; later-phase commands remain targets:
+The Phase 1 through Phase 4 commands now exist; later-phase commands remain targets:
 
 ```bash
 python -m pytest -q
 python -m pytest -q tests/test_abm_graph.py tests/test_abm_one_step.py tests/test_abm_sampling.py tests/test_abm_simulation.py tests/test_abm_runner.py
 python -m pytest -q tests/test_abm_variance.py tests/test_abm_variance_runner.py
 python -m pytest -q tests/test_abm_uncertainty.py tests/test_abm_uncertainty_runner.py
+python -m pytest -q tests/test_pair_jax.py tests/test_pair_jax_runner.py
 PYTHONWARNINGS=error python -m pytest -q
 JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
 python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
 python experiments/run_abm_variance_diagnostic.py --config configs/abm_variance_diagnostic_small.toml
 python experiments/run_abm_uncertainty_diagnostic.py --config configs/abm_uncertainty_smoke.toml
+python experiments/run_pair_jax_small.py --config configs/pair_jax_small.toml
 
 # Later phases:
 python -m pytest -q tests/test_velocity_variance.py tests/test_conditioning.py
-python -m pytest -q tests/test_pair_one_step.py tests/test_pair_reward_moments.py
 python experiments/validate_abm_variance.py --config configs/variance_small.toml
 python experiments/reproduce_case2_1.py --config configs/case2_1_small.toml
 python experiments/benchmark_pair_gpu.py --config configs/case2_1_full_f32.toml

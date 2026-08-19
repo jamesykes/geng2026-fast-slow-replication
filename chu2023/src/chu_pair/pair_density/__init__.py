@@ -1,4 +1,28 @@
-"""Small NumPy pair-mass reference implementation."""
+"""NumPy reference and JAX legacy pair-mass implementations."""
+
+from .jax_solver import (
+    JAXConditionalDynamics,
+    JAXOneEdgeMoments,
+    JAXPairDiagnostics,
+    JAXPairGrid,
+    JAXPairSimulationResult,
+    JAXPairStepResult,
+    build_jax_pair_grid,
+    canonical_to_flat_layout,
+    checked_pair_mass_step,
+    checked_simulate_pair_density,
+    conditional_dynamics_jax,
+    flat_to_canonical_layout,
+    legacy_destination_indices_jax,
+    one_edge_moments_jax,
+    ordered_pair_mass_jax,
+    pair_diagnostics_jax,
+    pair_mass_step_jax,
+    pair_mass_step_jit,
+    simulate_pair_density_jax,
+    simulate_pair_density_jit,
+    validate_jax_pair_mass,
+)
 
 from .numpy_reference import (
     ConditionalDynamics,
@@ -14,13 +38,33 @@ from .numpy_reference import (
 
 __all__ = [
     "ConditionalDynamics",
+    "JAXConditionalDynamics",
+    "JAXOneEdgeMoments",
+    "JAXPairDiagnostics",
+    "JAXPairGrid",
+    "JAXPairSimulationResult",
+    "JAXPairStepResult",
     "OneEdgeMoments",
     "PairStepResult",
     "ReferenceSizeError",
     "conditional_dynamics",
+    "conditional_dynamics_jax",
+    "build_jax_pair_grid",
+    "canonical_to_flat_layout",
+    "checked_pair_mass_step",
+    "checked_simulate_pair_density",
     "endpoint_exchange_symmetry_error",
     "focal_marginal",
+    "flat_to_canonical_layout",
+    "legacy_destination_indices_jax",
+    "one_edge_moments_jax",
+    "ordered_pair_mass_jax",
+    "pair_diagnostics_jax",
+    "pair_mass_step_jax",
+    "pair_mass_step_jit",
     "one_edge_moments",
     "pair_mass_step",
+    "simulate_pair_density_jax",
+    "simulate_pair_density_jit",
+    "validate_jax_pair_mass",
 ]
-
