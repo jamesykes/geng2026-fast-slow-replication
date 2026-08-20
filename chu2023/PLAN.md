@@ -18,7 +18,7 @@ D_j(q,t) = Var[v_j^i | Q_t^i=q, A_t^i=a_j]
 
 The first version will measure distinct-opponent covariance from the ABM and will treat `c_j=0` only as an explicitly labelled conditional-independence pair closure. It will not implement a triplet closure or substitute an unconditional action-mixture variance for `D_j(q,t)`.
 
-The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1, 2, the bounded selected-action Phase 3A and independent-run uncertainty Phase 3B milestones, and the bounded CPU Phase 4 JAX pair solver are implemented; counterfactual diagnostics, production/GPU pair transport, and full variance experiments remain future work.
+The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1, 2, the bounded selected-action Phase 3A and independent-run uncertainty Phase 3B milestones, the bounded CPU Phase 4 JAX pair solver, Phase 5 matched comparison, and the exact separable part of Phase 6 are implemented. Counterfactual diagnostics, interpolation/convergence, an actual production GPU run, and full variance experiments remain future work.
 
 ## 2. Proposed repository structure
 
@@ -411,18 +411,27 @@ Exit gate:
 
 Keep exact legacy reproduction and improved numerics as distinct modes.
 
+Status: **exact separable nearest-legacy kernel complete; interpolation and grid-convergence work not started.**
+
 Tasks:
 
-1. Name the original mode `nearest_legacy` and preserve its round-to-grid behaviour.
-2. Add conservative linear interpolation only after legacy parity is established.
-3. Verify interpolation weights are non-negative, sum to one, and respect boundaries.
-4. Run grid-spacing studies on manageable CPU cases, comparing `h`, `h/2` where feasible, nearest versus interpolation, and float32 versus float64.
-5. Quantify grid locking and changes in mean trajectories and Q-resolved one-edge moments.
-6. Repeat the small four-way variance comparison when numerical policy materially changes `sigma_j,pair^2`.
+1. **Met for the exact transport implementation.** Preserve the original nearest-legacy round-to-grid behaviour and keep the committed flat kernel as the explicit default/oracle.
+2. **Met.** Add an explicit `separable` selector implementing the same eight branch maps with bounded row/column tiles, including partial, unit and at/over-`M` block sizes. It retains neither a full row intermediate nor `D x 4` branch arrays.
+3. **Met.** Construct the independent ordered pair density from the one-agent histogram and controlled half/half state law inside both combined compiled device paths. The bounded result has no final density leaf; the reduced validation object returns one only for parity. No standalone initializer executable remains.
+4. **Met for reduced CPU cases.** Independently test hand branch weights, endpoint-specific maps, a fixed explicitly enumerated simultaneous row/column collision oracle, both states, all action branches, projection ties, zero support, symmetry, NumPy/flat/separable parity, eager/JIT, multi-step summaries, float32 and CPU+x64.
+5. **Met for bounded feasibility, not production execution.** Preflight exact normalized small benchmark shapes before allocation; compile and completely analyze all four combined objects and both reduction executables before their device inputs or execution; bind each exact compiled interface to a factory-created runtime-only contract with signature/integrity digests and fresh live-memory agreement; rebuild invocation identity internally from actual arguments, tolerance, static context and runtime before every synchronized call; retain counterbalanced timing samples/positions/dispersion; and project `G=131` bytes allocation-free. Production capacity requires non-overridable exact identity, complete analysis, GPU backend, immutable 60-second freshness and usable-memory evidence matched by stable UUID/MIG/PCI identity or trusted CUDA-runtime mapping.
+6. **Met as an investigation.** Measure a sorted-segment branch reduction against scatter. Do not adopt it because the measured order/sort temporary increased compiled memory.
+7. Add conservative linear interpolation only after legacy parity is established.
+8. Verify interpolation weights are non-negative, sum to one, and respect boundaries.
+9. Run grid-spacing studies on manageable CPU cases, comparing `h`, `h/2` where feasible, nearest versus interpolation, and float32 versus float64.
+10. Quantify grid locking and changes in mean trajectories and Q-resolved one-edge moments.
+11. Repeat the small four-way variance comparison when numerical policy materially changes `sigma_j,pair^2`.
 
 Exit gate:
 
-- Reports distinguish legacy reproduction error, grid discretisation error, floating-point error, and statistical ABM error. No production default changes merely because an alternative looks smoother.
+- **Partially met.** Exact nearest-legacy flat/separable scientific parity and bounded CPU resource behavior are established. Reports distinguish backend accumulation tolerance from scientific transport changes, and the flat default is unchanged. Interpolation and CPU grid convergence are still required before this phase is complete.
+- On the production-oriented bounded `G=9` CPU object, separable compiled device storage is 247,759 bytes versus 290,383 bytes for the flat solver with 64-cell chunks; the separate full-density-return validation object is recorded even where it is not smaller. This is reduced-grid CPU evidence only, not a GPU/full-grid claim.
+- The 52 focused tests give `49 passed, 3 skipped` by default and `52 passed` in CPU+x64. The complete warnings-as-errors suite gives `315 passed, 8 skipped` by default and `323 passed` in CPU+x64. No full-grid allocation/lowering/compilation, interpolation or GPU validation was performed.
 
 ## 11. Phase 7 - Full GPU pair-density transport
 
@@ -494,15 +503,18 @@ python -m pytest -q tests/test_abm_graph.py tests/test_abm_one_step.py tests/tes
 python -m pytest -q tests/test_abm_variance.py tests/test_abm_variance_runner.py
 python -m pytest -q tests/test_abm_uncertainty.py tests/test_abm_uncertainty_runner.py
 python -m pytest -q tests/test_pair_jax.py tests/test_pair_jax_runner.py
+python -m pytest -q tests/test_velocity_variance.py tests/test_velocity_variance_runner.py
+python -m pytest -q tests/test_pair_separable.py tests/test_pair_separable_runner.py
 PYTHONWARNINGS=error python -m pytest -q
 JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
 python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
 python experiments/run_abm_variance_diagnostic.py --config configs/abm_variance_diagnostic_small.toml
 python experiments/run_abm_uncertainty_diagnostic.py --config configs/abm_uncertainty_smoke.toml
 python experiments/run_pair_jax_small.py --config configs/pair_jax_small.toml
+python experiments/run_velocity_variance_comparison.py --config configs/velocity_variance_comparison_small.toml
+python experiments/run_pair_separable_benchmark.py --config configs/pair_separable_benchmark_small.toml
 
 # Later phases:
-python -m pytest -q tests/test_velocity_variance.py tests/test_conditioning.py
 python experiments/validate_abm_variance.py --config configs/variance_small.toml
 python experiments/reproduce_case2_1.py --config configs/case2_1_small.toml
 python experiments/benchmark_pair_gpu.py --config configs/case2_1_full_f32.toml

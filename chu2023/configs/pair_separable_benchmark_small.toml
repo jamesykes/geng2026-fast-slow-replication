@@ -1,0 +1,59 @@
+[model]
+alpha = 0.4
+tau = 1.3
+state_probabilities = [0.5, 0.5]
+
+[benchmark]
+warmup = 1
+repetitions = 2
+safety_margin_fraction = 0.25
+
+[[cases]]
+label = "g3-block1"
+q_min = -1.0
+q_max = 1.0
+spacing = 1.0
+dtype = "float32"
+steps = 1
+source_times = [0, 1]
+flat_chunk_size = 162
+row_block_size = 1
+column_block_size = 1
+diagnostic_tolerance = 0.000003
+symmetry_tolerance = 0.000003
+
+[[cases]]
+label = "g5-partial"
+q_min = -1.0
+q_max = 1.0
+spacing = 0.5
+dtype = "float32"
+steps = 2
+source_times = [0, 1, 2]
+flat_chunk_size = 1250
+row_block_size = 7
+column_block_size = 6
+diagnostic_tolerance = 0.000004
+symmetry_tolerance = 0.000004
+
+[[cases]]
+label = "g9-block-over-M"
+q_min = -1.0
+q_max = 1.0
+spacing = 0.25
+dtype = "float32"
+steps = 1
+source_times = [0, 1]
+flat_chunk_size = 64
+row_block_size = 81
+column_block_size = 100
+diagnostic_tolerance = 0.000006
+symmetry_tolerance = 0.000006
+
+[feasibility]
+grid_size = 131
+representative_steps = 100
+representative_summary_count = 11
+
+[output]
+run_name = "separable-pair-cpu-small"

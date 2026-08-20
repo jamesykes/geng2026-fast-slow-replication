@@ -17,7 +17,12 @@
 - The Phase 5 hybrid replaces only the pair finite-bin distinct-opponent covariance with the matched ABM covariance. Complete independent ABM runs remain the bootstrap units; pair-only quantities are deterministic.
 - Phase 5 pair summaries and diagnostics must come from the exact compiled `lax.scan` object whose memory analysis passed; validate an independently rebuilt invocation signature before calling it. Retain the finest sufficient statistics plus at most one coarse reconstruction, and stream wide CSV rows without a full row collection (16 KiB live object and 8 KiB ASCII record bounds).
 - Phase 5 resource metadata uses phase-specific lifetime maxima, including `(T+1)` diagnostic rows and `T` destination-validity booleans on device and host; do not import Phase 4 runner-only output buffers.
-- Do not add counterfactual unselected-action instrumentation, focal-agent resampling, production/full-grid runs, interpolation, or GPU benchmarks yet.
+- The exact separable pair kernel is a tiled row/column-map pushforward. Keep the flat scatter as the default validation oracle, process branches sequentially, and never materialize a `D x 4` branch array or a full density history.
+- Production-oriented pair initialization transfers the one-agent histogram and constructs the independent ordered pair mass on device. Its bounded scan may return source summaries and diagnostics, but not a full final density to the host.
+- Compile and completely analyze every separable benchmark executable, including reduction microbenchmarks, before invoking any of them. Central validation must re-read `memory_analysis()` from the retained callable; execute it only after a signature rebuilt internally from the actual arguments and tolerance matches.
+- Production GPU capacity requires evidence no older than the immutable 60-second cap and matched by UUID, MIG UUID, normalized PCI identity or a trusted CUDA-runtime ordinal mapping. Never compare numeric CUDA visibility tokens with `nvidia-smi` indices. `--allow-expensive` cannot override executable identity, analysis completeness, backend, device matching or capacity evidence.
+- Keep ordinary separable tests and benchmarks at `G<=17`. The `G=131` calculation is allocation-free feasibility only until an exact executable analysis, compatible GPU and known device capacity pass the production preflight.
+- Do not add counterfactual unselected-action instrumentation, focal-agent resampling, production/full-grid runs, interpolation, production inference, or unvalidated GPU claims yet.
 
 Commands:
 
@@ -30,10 +35,12 @@ python -m pytest -q tests/test_abm_variance.py tests/test_abm_variance_runner.py
 python -m pytest -q tests/test_abm_uncertainty.py tests/test_abm_uncertainty_runner.py
 python -m pytest -q tests/test_pair_jax.py tests/test_pair_jax_runner.py
 python -m pytest -q tests/test_velocity_variance.py tests/test_velocity_variance_runner.py
+python -m pytest -q tests/test_pair_separable.py tests/test_pair_separable_runner.py
 JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
 python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
 python experiments/run_abm_variance_diagnostic.py --config configs/abm_variance_diagnostic_small.toml
 python experiments/run_abm_uncertainty_diagnostic.py --config configs/abm_uncertainty_smoke.toml
 python experiments/run_pair_jax_small.py --config configs/pair_jax_small.toml
 python experiments/run_velocity_variance_comparison.py --config configs/velocity_variance_comparison_small.toml
+python experiments/run_pair_separable_benchmark.py --config configs/pair_separable_benchmark_small.toml
 ```

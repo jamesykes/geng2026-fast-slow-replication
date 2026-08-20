@@ -19,6 +19,9 @@ from .numpy_reference import PairSymmetryError
 
 
 DEFAULT_MAX_JAX_PAIR_ELEMENTS = 5_000_000
+PAIR_KERNEL_FLAT = "flat"
+PAIR_KERNEL_SEPARABLE = "separable"
+PAIR_KERNELS = frozenset({PAIR_KERNEL_FLAT, PAIR_KERNEL_SEPARABLE})
 
 
 def _validate_requested_dtype(dtype, object_name: str) -> np.dtype:
@@ -148,6 +151,14 @@ class JAXPairSourceSimulationResult(NamedTuple):
     destinations_valid: jax.Array
 
 
+class JAXPairBoundedSourceResult(NamedTuple):
+    """Production-oriented outputs without a complete final-density transfer."""
+
+    source_summaries: JAXPairPointSufficient
+    diagnostics: JAXPairDiagnostics
+    destinations_valid: jax.Array
+
+
 def build_jax_pair_grid(grid: QGrid, dtype=jnp.float32) -> JAXPairGrid:
     """Build small reusable device arrays after host-side resource preflight."""
 
@@ -230,9 +241,30 @@ def ordered_pair_mass_jax(
         float(state_mass.sum()), 1.0, rtol=0.0, atol=1e-12
     ):
         raise ValueError("state probabilities must be non-negative and sum to one")
-    flat = jnp.asarray(histogram.mass.reshape(-1), dtype=dtype)
-    states = jnp.asarray(state_mass, dtype=dtype)
+    return ordered_pair_mass_from_histogram_jax(
+        jnp.asarray(histogram.mass.reshape(-1), dtype=dtype),
+        jnp.asarray(state_mass, dtype=dtype),
+    )
+
+
+def ordered_pair_mass_from_histogram_jax(
+    histogram_mass: jax.Array,
+    state_probabilities: jax.Array,
+) -> jax.Array:
+    """Construct independent ordered endpoints entirely from device vectors."""
+
+    flat = jnp.asarray(histogram_mass)
+    states = jnp.asarray(state_probabilities, dtype=flat.dtype)
+    if flat.ndim != 1:
+        raise ValueError("histogram_mass must be a flat one-agent mass vector")
+    if states.shape != (2,):
+        raise ValueError("state_probabilities must have shape (2,)")
     return states[:, None, None] * flat[None, :, None] * flat[None, None, :]
+
+
+ordered_pair_mass_from_histogram_jit = jax.jit(
+    ordered_pair_mass_from_histogram_jax
+)
 
 
 def validate_jax_pair_mass(
@@ -504,6 +536,151 @@ pair_mass_step_jit = partial(jax.jit, static_argnames=("chunk_size",))(
 )
 
 
+def pair_mass_step_separable_jax(
+    pair_mass: jax.Array,
+    grid: JAXPairGrid,
+    alpha,
+    tau,
+    *,
+    row_block_size: int,
+    column_block_size: int,
+) -> JAXPairStepResult:
+    """Apply the same pushforward through sequential endpoint transports.
+
+    Each old-state/action branch gathers a bounded source tile, applies the two
+    one-dimensional policy factors, and scatters it through the independently
+    gathered row and column maps.  This is the blocked algebraic equivalent of
+    row transport followed by column transport, without retaining an ``M x M``
+    intermediate. JAX/XLA scatter-add ordering is backend dependent when
+    several sources collide.
+    """
+
+    mass = jnp.asarray(pair_mass)
+    points = grid.agent_point_count
+    expected = (2, points, points)
+    if mass.shape != expected:
+        raise ValueError(f"flat pair mass must have shape {expected}")
+    if not jnp.issubdtype(mass.dtype, jnp.floating):
+        raise TypeError("pair mass must use a floating dtype")
+    for name, value in (
+        ("row_block_size", row_block_size),
+        ("column_block_size", column_block_size),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    row_block = min(row_block_size, points)
+    column_block = min(column_block_size, points)
+    row_block_count = (points + row_block - 1) // row_block
+    column_block_count = (points + column_block - 1) // column_block
+
+    dynamics = conditional_dynamics_jax(mass, grid, alpha, tau)
+    destinations, destinations_valid = legacy_destination_indices_jax(dynamics, grid)
+    safe_destinations = jnp.clip(destinations, 0, points - 1)
+    source_policy = _policy(grid, tau, mass.dtype)
+    transitions = jnp.asarray(TRANSITION_TENSOR, dtype=jnp.int32)
+    row_offsets = jnp.arange(row_block, dtype=jnp.int32)
+    column_offsets = jnp.arange(column_block, dtype=jnp.int32)
+    output = jnp.zeros_like(mass)
+
+    def add_branch(branch_index, branch_output):
+        old_state = branch_index // 4
+        action_pair = branch_index % 4
+        action_u = action_pair // 2
+        action_v = action_pair % 2
+        next_state = transitions[old_state, action_u, action_v]
+
+        def add_row_block(block_index, output_after_rows):
+            source_rows = block_index * row_block + row_offsets
+            valid_rows = source_rows < points
+            safe_rows = jnp.minimum(source_rows, points - 1)
+            destination_rows = safe_destinations[safe_rows, action_u]
+
+            def add_column_block(column_index, output_after_columns):
+                source_columns = column_index * column_block + column_offsets
+                valid_columns = source_columns < points
+                safe_columns = jnp.minimum(source_columns, points - 1)
+                source = mass[
+                    old_state,
+                    safe_rows[:, None],
+                    safe_columns[None, :],
+                ]
+                valid_tile = valid_rows[:, None] & valid_columns[None, :]
+                weighted = (
+                    source
+                    * source_policy[safe_rows, action_u][:, None]
+                    * source_policy[safe_columns, action_v][None, :]
+                    * valid_tile.astype(mass.dtype)
+                )
+                destination_columns = safe_destinations[
+                    safe_columns, action_v
+                ]
+                return output_after_columns.at[
+                    next_state,
+                    destination_rows[:, None],
+                    destination_columns[None, :],
+                ].add(weighted)
+
+            return jax.lax.fori_loop(
+                0,
+                column_block_count,
+                add_column_block,
+                output_after_rows,
+            )
+
+        return jax.lax.fori_loop(
+            0, row_block_count, add_row_block, branch_output
+        )
+
+    output = jax.lax.fori_loop(0, 8, add_branch, output)
+    return JAXPairStepResult(output, dynamics, destinations, destinations_valid)
+
+
+pair_mass_step_separable_jit = partial(
+    jax.jit,
+    static_argnames=("row_block_size", "column_block_size"),
+)(pair_mass_step_separable_jax)
+
+
+def pair_mass_step_selected_jax(
+    pair_mass: jax.Array,
+    grid: JAXPairGrid,
+    alpha,
+    tau,
+    *,
+    kernel: str = PAIR_KERNEL_FLAT,
+    chunk_size: int = 1,
+    row_block_size: int = 1,
+    column_block_size: int = 1,
+) -> JAXPairStepResult:
+    """Dispatch one exact nearest-grid step through an explicit static kernel."""
+
+    if kernel == PAIR_KERNEL_FLAT:
+        return pair_mass_step_jax(
+            pair_mass, grid, alpha, tau, chunk_size=chunk_size
+        )
+    if kernel == PAIR_KERNEL_SEPARABLE:
+        return pair_mass_step_separable_jax(
+            pair_mass,
+            grid,
+            alpha,
+            tau,
+            row_block_size=row_block_size,
+            column_block_size=column_block_size,
+        )
+    raise ValueError(f"kernel must be one of {sorted(PAIR_KERNELS)}")
+
+
+pair_mass_step_selected_jit = partial(
+    jax.jit,
+    static_argnames=(
+        "kernel",
+        "chunk_size",
+        "row_block_size",
+        "column_block_size",
+    ),
+)(pair_mass_step_selected_jax)
+
+
 def pair_diagnostics_jax(
     pair_mass: jax.Array,
     grid: JAXPairGrid,
@@ -576,6 +753,9 @@ def simulate_pair_density_jax(
     steps: int,
     chunk_size: int,
     diagnostic_tolerance,
+    kernel: str = PAIR_KERNEL_FLAT,
+    row_block_size: int = 1,
+    column_block_size: int = 1,
 ) -> JAXPairSimulationResult:
     """Run ``lax.scan`` while retaining only lean post-step diagnostics."""
 
@@ -584,12 +764,15 @@ def simulate_pair_density_jax(
 
     def body(carry, _):
         mass, valid_so_far = carry
-        step = pair_mass_step_jax(
+        step = pair_mass_step_selected_jax(
             mass,
             grid,
             alpha,
             tau,
+            kernel=kernel,
             chunk_size=chunk_size,
+            row_block_size=row_block_size,
+            column_block_size=column_block_size,
         )
         diagnostics = pair_diagnostics_jax(
             step.mass,
@@ -610,7 +793,13 @@ def simulate_pair_density_jax(
 
 simulate_pair_density_jit = partial(
     jax.jit,
-    static_argnames=("steps", "chunk_size"),
+    static_argnames=(
+        "steps",
+        "chunk_size",
+        "kernel",
+        "row_block_size",
+        "column_block_size",
+    ),
 )(simulate_pair_density_jax)
 
 
@@ -625,6 +814,9 @@ def simulate_pair_source_summaries_jax(
     summary_count: int,
     chunk_size: int,
     diagnostic_tolerance,
+    kernel: str = PAIR_KERNEL_FLAT,
+    row_block_size: int = 1,
+    column_block_size: int = 1,
 ) -> JAXPairSourceSimulationResult:
     """Scan from ``P_0`` and retain only requested source summaries.
 
@@ -676,8 +868,15 @@ def simulate_pair_source_summaries_jax(
         diagnostics = pair_diagnostics_jax(
             mass, grid, tau, tolerance=diagnostic_tolerance
         )
-        step = pair_mass_step_jax(
-            mass, grid, alpha, tau, chunk_size=chunk_size
+        step = pair_mass_step_selected_jax(
+            mass,
+            grid,
+            alpha,
+            tau,
+            kernel=kernel,
+            chunk_size=chunk_size,
+            row_block_size=row_block_size,
+            column_block_size=column_block_size,
         )
         return (step.mass, stored), (diagnostics, step.destinations_valid)
 
@@ -702,8 +901,120 @@ def simulate_pair_source_summaries_jax(
 
 simulate_pair_source_summaries_jit = partial(
     jax.jit,
-    static_argnames=("steps", "summary_count", "chunk_size"),
+    static_argnames=(
+        "steps",
+        "summary_count",
+        "chunk_size",
+        "kernel",
+        "row_block_size",
+        "column_block_size",
+    ),
 )(simulate_pair_source_summaries_jax)
+
+
+def simulate_pair_source_summaries_from_histogram_jax(
+    histogram_mass: jax.Array,
+    state_probabilities: jax.Array,
+    grid: JAXPairGrid,
+    alpha,
+    tau,
+    source_slot_by_time: jax.Array,
+    *,
+    steps: int,
+    summary_count: int,
+    chunk_size: int,
+    diagnostic_tolerance,
+    kernel: str = PAIR_KERNEL_SEPARABLE,
+    row_block_size: int = 1,
+    column_block_size: int = 1,
+) -> JAXPairBoundedSourceResult:
+    """Initialize on device, scan, and return no complete final density."""
+
+    initial_mass = ordered_pair_mass_from_histogram_jax(
+        histogram_mass, state_probabilities
+    )
+    result = simulate_pair_source_summaries_jax(
+        initial_mass,
+        grid,
+        alpha,
+        tau,
+        source_slot_by_time,
+        steps=steps,
+        summary_count=summary_count,
+        chunk_size=chunk_size,
+        diagnostic_tolerance=diagnostic_tolerance,
+        kernel=kernel,
+        row_block_size=row_block_size,
+        column_block_size=column_block_size,
+    )
+    return JAXPairBoundedSourceResult(
+        result.source_summaries,
+        result.diagnostics,
+        result.destinations_valid,
+    )
+
+
+def simulate_pair_source_summaries_from_histogram_full_jax(
+    histogram_mass: jax.Array,
+    state_probabilities: jax.Array,
+    grid: JAXPairGrid,
+    alpha,
+    tau,
+    source_slot_by_time: jax.Array,
+    *,
+    steps: int,
+    summary_count: int,
+    chunk_size: int,
+    diagnostic_tolerance,
+    kernel: str = PAIR_KERNEL_SEPARABLE,
+    row_block_size: int = 1,
+    column_block_size: int = 1,
+) -> JAXPairSourceSimulationResult:
+    """Validation-only combined initializer/scan that returns the final mass."""
+
+    initial_mass = ordered_pair_mass_from_histogram_jax(
+        histogram_mass, state_probabilities
+    )
+    return simulate_pair_source_summaries_jax(
+        initial_mass,
+        grid,
+        alpha,
+        tau,
+        source_slot_by_time,
+        steps=steps,
+        summary_count=summary_count,
+        chunk_size=chunk_size,
+        diagnostic_tolerance=diagnostic_tolerance,
+        kernel=kernel,
+        row_block_size=row_block_size,
+        column_block_size=column_block_size,
+    )
+
+
+simulate_pair_source_summaries_from_histogram_jit = partial(
+    jax.jit,
+    static_argnames=(
+        "steps",
+        "summary_count",
+        "chunk_size",
+        "kernel",
+        "row_block_size",
+        "column_block_size",
+    ),
+)(simulate_pair_source_summaries_from_histogram_jax)
+
+
+simulate_pair_source_summaries_from_histogram_full_jit = partial(
+    jax.jit,
+    static_argnames=(
+        "steps",
+        "summary_count",
+        "chunk_size",
+        "kernel",
+        "row_block_size",
+        "column_block_size",
+    ),
+)(simulate_pair_source_summaries_from_histogram_full_jax)
 
 
 def validate_pair_source_diagnostics(
@@ -754,6 +1065,9 @@ def checked_simulate_pair_source_summaries(
     chunk_size: int,
     symmetry_tolerance: float,
     diagnostic_tolerance: float,
+    kernel: str = PAIR_KERNEL_FLAT,
+    row_block_size: int = 1,
+    column_block_size: int = 1,
     max_elements: int | None = DEFAULT_MAX_JAX_PAIR_ELEMENTS,
 ) -> JAXPairSourceSimulationResult:
     """Run and validate the jitted Phase 5 function outside guarded runners."""
@@ -779,6 +1093,9 @@ def checked_simulate_pair_source_summaries(
         summary_count=summary_count,
         chunk_size=chunk_size,
         diagnostic_tolerance=diagnostic_tolerance,
+        kernel=kernel,
+        row_block_size=row_block_size,
+        column_block_size=column_block_size,
     )
     return validate_pair_source_result(
         result,
@@ -933,6 +1250,9 @@ def checked_pair_mass_step(
     *,
     chunk_size: int,
     symmetry_tolerance: float,
+    kernel: str = PAIR_KERNEL_FLAT,
+    row_block_size: int = 1,
+    column_block_size: int = 1,
     max_elements: int | None = DEFAULT_MAX_JAX_PAIR_ELEMENTS,
 ) -> JAXPairStepResult:
     """Validated host wrapper around the compiled-compatible one-step kernel."""
@@ -944,8 +1264,15 @@ def checked_pair_mass_step(
         symmetry_tolerance=symmetry_tolerance,
         max_elements=max_elements,
     )
-    result = pair_mass_step_jit(
-        validated, grid, alpha, tau, chunk_size=chunk_size
+    result = pair_mass_step_selected_jit(
+        validated,
+        grid,
+        alpha,
+        tau,
+        kernel=kernel,
+        chunk_size=chunk_size,
+        row_block_size=row_block_size,
+        column_block_size=column_block_size,
     )
     if not bool(np.asarray(result.destinations_valid)):
         raise GridBoundsError("legacy projected destination lies outside the JAX pair grid")
@@ -968,6 +1295,9 @@ def checked_simulate_pair_density(
     chunk_size: int,
     symmetry_tolerance: float,
     diagnostic_tolerance: float,
+    kernel: str = PAIR_KERNEL_FLAT,
+    row_block_size: int = 1,
+    column_block_size: int = 1,
     max_elements: int | None = DEFAULT_MAX_JAX_PAIR_ELEMENTS,
 ) -> JAXPairSimulationResult:
     """Validate before/after a lean compiled scan and reject invalid destinations."""
@@ -989,6 +1319,9 @@ def checked_simulate_pair_density(
         steps=steps,
         chunk_size=chunk_size,
         diagnostic_tolerance=diagnostic_tolerance,
+        kernel=kernel,
+        row_block_size=row_block_size,
+        column_block_size=column_block_size,
     )
     if not bool(np.asarray(result.destinations_valid)):
         raise GridBoundsError("legacy projected destination lies outside the JAX pair grid")
