@@ -1,0 +1,5 @@
+# Exact pilot environment. Install only in a dedicated project-local virtualenv.
+jax[cuda12]==0.7.2
+numpy==2.2.4
+pytest==9.1.1
+tomli==2.2.1; python_version < "3.11"

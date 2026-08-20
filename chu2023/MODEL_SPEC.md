@@ -964,3 +964,16 @@ The immediate scientific question is whether `c_j` is negligible and, when it is
 5. What boundary behaviour should apply for future payoff matrices, learning rates, or Q-ranges that violate the current convex-range invariant?
 6. After exact legacy parity, should the production pair solver retain nearest-grid rounding or adopt conservative interpolation/convergence refinement?
 7. What GPU hardware, memory budget, precision requirement, and reproducibility tolerance will define the target scale?
+## GPU pilot operational contract
+
+The guarded Lambda Cloud pilot does not change the scientific model, pair chronology, projection, initialization, observables, or variance definitions. It is an execution envelope for the exact bounded separable source-summary executable already validated against the NumPy and flat-scatter oracles.
+
+The numerical stage order is fixed: strict allocation-free configuration/resource inspection; clean matching doctor and predecessor evidence; abstract lowering; exact compilation; live complete executable analysis; fresh CUDA-driver-stable device/capacity admission with configured safety margin; device input construction; a second fresh capacity check adjacent to invocation; then execution and the existing scientific diagnostics. The pair mass is constructed from the one-agent histogram inside the analyzed executable. No host pair mass or full final-density return is permitted.
+
+The pilot one-agent law is a recorded seeded legacy scaled-Beta histogram with the original draw order and local RNG. Its count storage and draw count are guarded before construction. `G=131` uses the original `[-0.1,1.2]` grid at spacing `0.01`; reduced pilot grids use explicit decimal-aligned ranges containing `[-0.1,1.2]` and are performance/parity cases rather than convergence evidence.
+
+The pilot ladder is `G=3,5,9` flat/separable parity, `G=17,33` separable, `G=65` separable, optional independently enabled `G=97`, `G=131` analysis only, and at most one separately confirmed `G=131` step. A full-grid multi-step run is outside this milestone. Full-grid confirmation, prior-artifact identity/freshness, executable identity/completeness, GPU backend and stable device matching, usable capacity, the one-step limit, and scientific validity are non-overridable.
+
+Numeric CUDA visibility is mapped through the initialized CUDA Driver API to UUID and PCI identity; numeric tokens are never treated as `nvidia-smi` indices. MIG visibility is recognized but fails capacity admission until slice-level memory evidence can be matched safely. Capacity evidence is immutable at no more than 60 seconds old and is a conservative admission observation, not a guarantee. Allocator policy is explicit before JAX import and is part of environment provenance.
+
+Pilot costs are estimates derived only from measured elapsed wall time and an explicitly acknowledged user-supplied hourly price. They are not provider billing data. The deployment scripts neither contact Lambda Cloud nor create, access, or terminate instances.

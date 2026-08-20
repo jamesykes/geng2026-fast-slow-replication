@@ -1,4 +1,5 @@
 /outputs/
 /.pytest_cache/
 /.test-deps/
+/.venv-gpu/
 *.egg-info/

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -409,6 +410,15 @@ def _runtime_environment_signature() -> dict:
     ]
     if not identities:
         raise RuntimeError("JAX reported no execution devices")
+    allocator_environment = {
+        name: os.environ[name]
+        for name in (
+            "XLA_PYTHON_CLIENT_PREALLOCATE",
+            "XLA_PYTHON_CLIENT_MEM_FRACTION",
+            "XLA_PYTHON_CLIENT_ALLOCATOR",
+        )
+        if name in os.environ
+    }
     return {
         "backend": str(jax.default_backend()),
         "platform": identities[0]["platform"],
@@ -417,6 +427,7 @@ def _runtime_environment_signature() -> dict:
         "jax_enable_x64": bool(jax.config.read("jax_enable_x64")),
         "jax_version": str(jax.__version__),
         "jaxlib_version": str(jaxlib.__version__),
+        "allocator_environment": allocator_environment,
     }
 
 

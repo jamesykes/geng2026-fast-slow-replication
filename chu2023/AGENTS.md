@@ -22,6 +22,7 @@
 - Compile and completely analyze every separable benchmark executable, including reduction microbenchmarks, before invoking any of them. Central validation must re-read `memory_analysis()` from the retained callable; execute it only after a signature rebuilt internally from the actual arguments and tolerance matches.
 - Production GPU capacity requires evidence no older than the immutable 60-second cap and matched by UUID, MIG UUID, normalized PCI identity or a trusted CUDA-runtime ordinal mapping. Never compare numeric CUDA visibility tokens with `nvidia-smi` indices. `--allow-expensive` cannot override executable identity, analysis completeness, backend, device matching or capacity evidence.
 - Keep ordinary separable tests and benchmarks at `G<=17`. The `G=131` calculation is allocation-free feasibility only until an exact executable analysis, compatible GPU and known device capacity pass the production preflight.
+- Ordinary GPU-pilot validation is CPU-only and mocked. Never query a real GPU or lower, compile, allocate, or execute `G=131` locally; real stages require the documented clean-cloud prerequisite ladder and explicit confirmations.
 - Do not add counterfactual unselected-action instrumentation, focal-agent resampling, production/full-grid runs, interpolation, production inference, or unvalidated GPU claims yet.
 
 Commands:
@@ -36,6 +37,7 @@ python -m pytest -q tests/test_abm_uncertainty.py tests/test_abm_uncertainty_run
 python -m pytest -q tests/test_pair_jax.py tests/test_pair_jax_runner.py
 python -m pytest -q tests/test_velocity_variance.py tests/test_velocity_variance_runner.py
 python -m pytest -q tests/test_pair_separable.py tests/test_pair_separable_runner.py
+python -m pytest -q tests/test_gpu_pilot_identity.py tests/test_gpu_pilot_workflow.py
 JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
 python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
 python experiments/run_abm_variance_diagnostic.py --config configs/abm_variance_diagnostic_small.toml

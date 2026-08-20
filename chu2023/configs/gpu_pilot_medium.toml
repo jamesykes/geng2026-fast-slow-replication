@@ -1,0 +1,33 @@
+[environment]
+allocator_policy = "fraction"
+memory_fraction = 0.85
+
+[model]
+alpha = 0.4
+tau = 1.3
+state_probabilities = [0.5, 0.5]
+
+[initial_condition]
+histogram_seed = 20230818
+samples_per_grid_cell = 10
+
+[case]
+stage = "medium"
+grids = [17, 33]
+dtype = "float32"
+steps = 1
+source_times = [0, 1]
+row_block_size = 128
+column_block_size = 128
+diagnostic_tolerance = 0.0001
+symmetry_tolerance = 0.0001
+include_g97 = false
+
+[budget]
+hourly_price_usd = 0.0
+max_session_cost_usd = 200.0
+max_stage_seconds = 1800
+safety_margin_fraction = 0.25
+
+[output]
+run_name = "gpu-pilot-medium"

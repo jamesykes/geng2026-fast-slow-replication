@@ -77,6 +77,25 @@ class DeviceCapacityObservation:
     usable_device_bytes: int | None
     usable_bytes_definition: str
     unavailable_reason: str | None = None
+    # ``nvidia-smi`` reports free memory after allocations owned by this
+    # process.  Keep that fact explicit rather than treating the remaining
+    # global free bytes as unavailable to an already-created JAX pool.
+    current_process_owned_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class AllocatorCapacityObservation:
+    """Post-input allocator evidence for one already initialized JAX device."""
+
+    available: bool
+    policy: str
+    byte_limit: int | None
+    bytes_in_use: int | None
+    peak_bytes_in_use: int | None
+    largest_free_block_bytes: int | None
+    internal_free_bytes: int | None
+    source: str
+    unavailable_reason: str | None = None
 
 
 def _canonical_digest(value: Mapping[str, object]) -> str:
@@ -503,6 +522,135 @@ def unavailable_device_capacity_observation(
     )
 
 
+def allocator_capacity_observation(
+    statistics: object,
+    *,
+    policy: str,
+) -> AllocatorCapacityObservation:
+    """Normalize supported JAX allocator statistics, failing closed otherwise.
+
+    JAX device ``memory_stats`` is intentionally queried only after device
+    inputs exist.  The required fields are conservative: a fixed pool must
+    report its limit, current use, and largest free block before it can admit a
+    further compiled invocation.
+    """
+
+    if policy not in {"default", "fraction", "no-preallocation"}:
+        raise ValueError("allocator policy is invalid")
+    if not isinstance(statistics, Mapping):
+        return AllocatorCapacityObservation(
+            False, policy, None, None, None, None, None,
+            "jax.device.memory_stats", "allocator statistics are unavailable",
+        )
+
+    def integer(name: str) -> int | None:
+        value = statistics.get(name)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+    limit = integer("bytes_limit")
+    in_use = integer("bytes_in_use")
+    peak = integer("peak_bytes_in_use")
+    largest = integer("largest_free_block_bytes")
+    if limit is None or in_use is None or in_use > limit:
+        return AllocatorCapacityObservation(
+            False, policy, limit, in_use, peak, largest, None,
+            "jax.device.memory_stats", "allocator limit/use statistics are incomplete",
+        )
+    internal = limit - in_use
+    # A fixed arena cannot safely promise a new large allocation when
+    # fragmentation information is unavailable.  Growing allocators use fresh
+    # external free capacity for their incremental requirement instead.
+    if policy != "no-preallocation" and largest is None:
+        return AllocatorCapacityObservation(
+            False, policy, limit, in_use, peak, None, internal,
+            "jax.device.memory_stats", "largest allocator free block is unavailable",
+        )
+    if largest is not None and largest > internal:
+        return AllocatorCapacityObservation(
+            False, policy, limit, in_use, peak, largest, internal,
+            "jax.device.memory_stats", "largest allocator free block exceeds internal free bytes",
+        )
+    return AllocatorCapacityObservation(
+        True, policy, limit, in_use, peak, largest, internal,
+        "jax.device.memory_stats", None,
+    )
+
+
+def post_initialization_capacity_preflight(
+    *,
+    feasibility: Mapping[str, object],
+    bundle: CompiledExecutableBundle,
+    external_capacity: DeviceCapacityObservation,
+    allocator_capacity: AllocatorCapacityObservation,
+) -> dict[str, object]:
+    """Admit one exact invocation after its arguments already reside on device.
+
+    ``memory_analysis`` reports the full executable requirement including
+    arguments.  At this point those argument buffers are already resident, so
+    only ``output + temporary - aliases`` is incremental.  Fixed preallocated
+    pools are judged from their own free bytes, not from the globally free
+    memory left after the pool was reserved.  A growing allocator is judged
+    from fresh globally free bytes.  Every unavailable statistic fails closed.
+    """
+
+    report = validate_compiled_executable_bundle(bundle)
+    fields = ("argument_bytes", "output_bytes", "temporary_bytes", "alias_bytes")
+    if any(isinstance(report.get(name), bool) or not isinstance(report.get(name), int)
+           or report[name] < 0 for name in fields):
+        raise ValueError("post-initialization compiled memory analysis is incomplete")
+    argument, output, temporary, aliases = (int(report[name]) for name in fields)
+    if aliases > argument + output:
+        raise ValueError("post-initialization compiled alias accounting is invalid")
+    incremental = max(0, output + temporary - aliases)
+    margin = feasibility.get("safety_margin_fraction")
+    if isinstance(margin, bool) or not isinstance(margin, (int, float)) or not math.isfinite(float(margin)) or float(margin) < 0:
+        raise ValueError("post-initialization safety margin is invalid")
+    required = math.ceil(incremental * (1.0 + float(margin)))
+    if not external_capacity.available or external_capacity.free_bytes is None:
+        raise ValueError("post-initialization external capacity is unavailable")
+    if not allocator_capacity.available:
+        raise ValueError(
+            "post-initialization allocator capacity is unavailable: "
+            f"{allocator_capacity.unavailable_reason}"
+        )
+    if allocator_capacity.policy == "no-preallocation":
+        admitted = external_capacity.free_bytes
+        largest = None
+        derivation = "fresh external free bytes for growing allocator"
+    else:
+        if allocator_capacity.internal_free_bytes is None or allocator_capacity.largest_free_block_bytes is None:
+            raise ValueError("fixed allocator pool statistics are incomplete")
+        admitted = min(
+            allocator_capacity.internal_free_bytes,
+            allocator_capacity.largest_free_block_bytes,
+        )
+        largest = allocator_capacity.largest_free_block_bytes
+        derivation = "minimum internal pool free bytes and largest free allocator block"
+    if admitted < required:
+        raise ValueError("post-initialization allocator capacity is insufficient")
+    return {
+        "passed": True,
+        "allocator_policy": allocator_capacity.policy,
+        "external_total_bytes": external_capacity.total_physical_bytes,
+        "external_free_bytes": external_capacity.free_bytes,
+        "current_process_owned_bytes": external_capacity.current_process_owned_bytes,
+        "allocator_byte_limit": allocator_capacity.byte_limit,
+        "allocator_bytes_in_use": allocator_capacity.bytes_in_use,
+        "allocator_peak_bytes_in_use": allocator_capacity.peak_bytes_in_use,
+        "allocator_internal_free_bytes": allocator_capacity.internal_free_bytes,
+        "allocator_largest_free_block_bytes": largest,
+        "already_resident_argument_bytes": argument,
+        "incremental_output_bytes": output,
+        "incremental_temporary_bytes": temporary,
+        "alias_bytes": aliases,
+        "incremental_executable_requirement_bytes": incremental,
+        "safety_margin_fraction": float(margin),
+        "required_incremental_bytes_with_margin": required,
+        "admitted_usable_bytes": admitted,
+        "admission_derivation": derivation,
+    }
+
+
 def _normalize_pci_identifier(value: object) -> str | None:
     text = str(value).strip().lower()
     match = re.fullmatch(
@@ -533,6 +681,7 @@ def discover_nvidia_device_capacity(
     cuda_device_order: str | None = None,
     preallocate_setting: str | None = None,
     memory_fraction_setting: str | None = None,
+    post_initialization: bool = False,
 ) -> DeviceCapacityObservation:
     """Query bounded NVIDIA evidence and fail closed if device matching is ambiguous."""
 
@@ -685,7 +834,7 @@ def discover_nvidia_device_capacity(
                 reason="XLA_PYTHON_CLIENT_MEM_FRACTION is not in (0,1]",
             )
         allocator_available = math.floor(row["total"] * fraction)
-        if allocator_available > row["free"]:
+        if not post_initialization and allocator_available > row["free"]:
             return unavailable_device_capacity_observation(
                 source=source,
                 execution_device_identity=execution_device_identity,
@@ -992,12 +1141,13 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def production_capacity_preflight(
+def _gpu_capacity_preflight(
     *,
     feasibility: dict,
     bundle: CompiledExecutableBundle,
     capacity_observation: DeviceCapacityObservation,
     allow_expensive: bool,
+    required_kernel: str,
 ) -> dict[str, object]:
     """Require exact executable identity and fresh matched usable GPU capacity.
 
@@ -1014,8 +1164,8 @@ def production_capacity_preflight(
         live_report = {}
     signature = bundle.compile_signature if isinstance(bundle, CompiledExecutableBundle) else {}
     report = bundle.memory_report if isinstance(bundle, CompiledExecutableBundle) else {}
-    if signature.get("kernel") != "separable":
-        violations.append("production_kernel_not_separable")
+    if signature.get("kernel") != required_kernel:
+        violations.append(f"required_kernel_not_{required_kernel}")
     if signature.get("backend") != "gpu" or signature.get("platform") != "gpu":
         violations.append("production_backend_not_gpu")
     if signature.get("state_expanded_cells") != feasibility.get("state_expanded_cells"):
@@ -1167,3 +1317,38 @@ def production_capacity_preflight(
             "bundle_integrity_sha256": bundle.bundle_integrity_sha256,
         },
     }
+
+
+def production_capacity_preflight(
+    *,
+    feasibility: dict,
+    bundle: CompiledExecutableBundle,
+    capacity_observation: DeviceCapacityObservation,
+    allow_expensive: bool,
+) -> dict[str, object]:
+    """Fail-closed capacity gate fixed to the production separable kernel."""
+
+    return _gpu_capacity_preflight(
+        feasibility=feasibility,
+        bundle=bundle,
+        capacity_observation=capacity_observation,
+        allow_expensive=allow_expensive,
+        required_kernel="separable",
+    )
+
+
+def flat_validation_capacity_preflight(
+    *,
+    feasibility: dict,
+    bundle: CompiledExecutableBundle,
+    capacity_observation: DeviceCapacityObservation,
+) -> dict[str, object]:
+    """Fail-closed capacity gate fixed to the small flat validation oracle."""
+
+    return _gpu_capacity_preflight(
+        feasibility=feasibility,
+        bundle=bundle,
+        capacity_observation=capacity_observation,
+        allow_expensive=False,
+        required_kernel="flat",
+    )

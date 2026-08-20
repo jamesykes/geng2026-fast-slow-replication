@@ -437,16 +437,20 @@ Exit gate:
 
 The GPU solver remains a required deliverable, but begins only after ABM variance instrumentation, small pair parity, and the first scientific comparison are working.
 
+Status: **guarded Lambda Cloud pilot workflow prepared; no GPU or full-grid compilation/execution performed.**
+
 Tasks:
 
-1. Benchmark vectorised payoff/edge-moment contractions separately from transport.
-2. Measure compiled peak memory for current density, destination density, endpoint maps, and every transport temporary.
-3. Sweep endpoint chunk sizes and compare flat scatter, staged segment-sum, and viable sparse representations.
-4. Avoid full `(branch, source_cell)` index and weight arrays. Generate branch data per chunk from length-`M` endpoint maps.
-5. Test JAX buffer donation and verify whether it reduces actual peak memory.
-6. Record compile time, step time, source-cell throughput, device model, JAX/XLA versions, precision, and peak bytes.
-7. Add a preflight estimator that rejects configurations whose conservative peak estimate exceeds a configured device budget.
-8. Check GPU run-to-run variation from scatter atomic order. Compare invariant, trajectory, and one-edge-moment tolerances rather than bitwise output.
+1. **Prepared.** Inspect Lambda Stack first, then create a project-local exact JAX 0.7.2 CUDA 12 or CUDA 13 environment without altering the system Python or driver.
+2. **Prepared.** Apply and record allocator policy before JAX import. Run the bounded doctor for versions, backend/devices, Git cleanliness/source hashes, stable CUDA identity, and current usable capacity.
+3. **Prepared and CPU-mocked.** Map numeric/reordered `CUDA_VISIBLE_DEVICES` through the CUDA Driver API to UUID/PCI identity; never compare it with physical `nvidia-smi` indices. Treat MIG capacity as unavailable until slice-level evidence exists.
+4. **Prepared.** Enforce the atomic prerequisite ladder: doctor; `G=3,5,9` flat/separable parity/timing; `G=17,33`; `G=65`; optional separately enabled `G=97`; separately confirmed `G=131` analysis only; separately confirmed hard one-step `G=131` execution.
+5. **Prepared.** Before invocation, require allocation-free planning, retained exact compiled identity, complete live analysis, and fresh matched capacity with margin, then construct device inputs. Recheck capacity adjacent to every call. Never construct a host pair mass or return full final density.
+6. **Prepared.** Record compile and first/subsequent execution time, bounded GPU process-memory telemetry when available, scientific diagnostics, provenance, atomic status/error artifacts, and elapsed-time cost from an acknowledged user price. Use an external timeout and rerun the doctor after timeout/OOM.
+7. Benchmark vectorised payoff/edge-moment contractions separately from transport.
+8. Measure compiled peak memory for all transport arrays and temporaries on the selected GPU.
+9. Sweep endpoint blocks and investigate donation only after the staged pilot succeeds; preserve the exact separable kernel and flat oracle.
+10. Check GPU run-to-run variation from scatter atomic order using toleranced invariants, trajectories, and moments rather than bitwise output.
 
 Scaling gates:
 
@@ -454,6 +458,9 @@ Scaling gates:
 - no out-of-memory failure occurs at the selected production configuration;
 - mass, non-negativity tolerance, symmetry, and moment diagnostics stay within limits;
 - full 131-grid runtime and peak memory are reported before larger/finer grids are attempted.
+- no stage advances on a stale, failed, mismatched, dirty, tampered, wrong-device, incomplete-analysis, insufficient-capacity, or scientifically invalid predecessor;
+- a one-step full-grid success is not permission for a multi-step run.
+- The pilot layer has 31 CPU-only tests. The complete 2026-08-20 warnings-as-errors validation gives `346 passed, 8 skipped` by default and `354 passed` with CPU+x64. Both CUDA-family setup previews, expected CPU-unavailable doctor mode, and all stage dry runs pass locally without a real GPU or full-grid lowering/compilation.
 
 ## 12. Phase 8 - Reproduction, scaling, and final comparisons
 
@@ -505,6 +512,7 @@ python -m pytest -q tests/test_abm_uncertainty.py tests/test_abm_uncertainty_run
 python -m pytest -q tests/test_pair_jax.py tests/test_pair_jax_runner.py
 python -m pytest -q tests/test_velocity_variance.py tests/test_velocity_variance_runner.py
 python -m pytest -q tests/test_pair_separable.py tests/test_pair_separable_runner.py
+python -m pytest -q tests/test_gpu_pilot_identity.py tests/test_gpu_pilot_workflow.py
 PYTHONWARNINGS=error python -m pytest -q
 JAX_PLATFORM_NAME=cpu JAX_ENABLE_X64=1 python -m pytest -q
 python experiments/run_abm_baseline.py --config configs/abm_baseline_small.toml
@@ -513,6 +521,8 @@ python experiments/run_abm_uncertainty_diagnostic.py --config configs/abm_uncert
 python experiments/run_pair_jax_small.py --config configs/pair_jax_small.toml
 python experiments/run_velocity_variance_comparison.py --config configs/velocity_variance_comparison_small.toml
 python experiments/run_pair_separable_benchmark.py --config configs/pair_separable_benchmark_small.toml
+python experiments/run_gpu_doctor.py --cuda-family cuda12 --allocator-policy fraction --memory-fraction 0.85
+python scripts/prepare_gpu_environment.py --cuda-family cuda12 --dry-run
 
 # Later phases:
 python experiments/validate_abm_variance.py --config configs/variance_small.toml
