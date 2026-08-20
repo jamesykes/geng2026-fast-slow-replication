@@ -829,14 +829,85 @@ The initial comparison has four separate checks:
 
    At finite bin width, first verify the reward-variance identity exactly with matched moments, then account for the documented Q-dispersion/reward-Q-covariance difference between reward variance and raw realised-velocity variance.
 3. **One-edge pair check.** Compare `sigma_j,pair^2` with `sigma_j,ABM^2` under matched Q-bin and action-conditioning weights. This isolates the accuracy of the pair solver's one-edge payoff law.
-4. **Theory comparison.** Compare direct ABM variance with both the pure `c_j=0` pair prediction and the diagnostic hybrid
+4. **Theory comparison.** At exact `q`, compare direct ABM variance with both the pure `c_j=0` pair prediction and the diagnostic hybrid
 
    ```text
    alpha^2 [sigma_j,pair^2/(n-1)
             + (n-2)c_j,ABM/(n-1)].
    ```
 
-This separation distinguishes error in the one-edge pair distribution from missing cross-opponent covariance.
+   For a finite bin, use the raw-moment pooled convention in Section 22.1 rather than forcing the bin-level pair covariance or Q-heterogeneity terms to zero.
+
+This separation distinguishes error in the one-edge pair distribution from missing cross-opponent covariance and finite-bin mixing.
+
+### 22.1 Phase 5 finite-bin convention and bounded implementation
+
+The earlier shorthand in Sections 18 and 22 writes the exact-Q closure as `alpha^2 sigma_j,pair^2(q,t)/N`, with `N=n-1`, because distinct opponents are conditionally independent at one exact focal `q`. Phase 5 must compare finite Q bins rather than exact continuous values, so applying that shorthand after pooling would silently discard between-Q mixing. The primary implemented finite-bin convention therefore pools raw pair moments first and then applies the full finite-bin velocity identity. The exact-Q shorthand remains valid only as a local diagnostic, and the occupancy-weighted mean of local `sigma^2(q,j)` is retained separately from the pooled-bin one-edge variance.
+
+At pair source time `t`, exact grid point `q`, and selected focal action `j`, define the selected mass
+
+```text
+a_t(q,j) = p_t(q) pi_j(q).
+```
+
+The pair solver emits bounded point/action raw sums proportional to
+
+```text
+a,
+a mu,
+a m2,
+a mu^2,
+a q_j,
+a q_j^2,
+a mu q_j.
+```
+
+The `a mu^2` term is the exact-Q conditional-independence distinct-opponent product. For a finite bin `B`, all seven quantities are summed over its grid points and only then divided by `sum_B a`. Consequently
+
+```text
+mu_B       = E_B[mu(q,j)]
+m2_B       = E_B[m2(q,j)]
+m11_B_pair = E_B[mu(q,j)^2]
+sigma2_B_pair = m2_B - mu_B^2
+c_B_pair      = m11_B_pair - mu_B^2.
+```
+
+Thus `c_B_pair=Var_B(mu(q,j))` can be positive even though the exact-Q conditional covariance is zero. Action conditioning is present in `a=p*pi_j`; it is not an unweighted occupancy average. The remaining pair terms are
+
+```text
+Var_B_pair(q_j) = E_B[q_j^2] - E_B[q_j]^2
+Cov_B_pair(r,q_j) = E_B[mu(q,j) q_j] - mu_B E_B[q_j].
+```
+
+The four implemented finite-bin velocity estimands are
+
+```text
+V_direct_ABM = Var_B[observed alpha(r-q_j)]
+
+V_reconstructed_ABM
+  = alpha^2 [sigma2_B_ABM/N + (N-1)c_B_ABM/N
+             + Var_B_ABM(q_j) - 2 Cov_B_ABM(r,q_j)]
+
+V_pair
+  = alpha^2 [sigma2_B_pair/N + (N-1)c_B_pair/N
+             + Var_B_pair(q_j) - 2 Cov_B_pair(r,q_j)]
+
+V_hybrid
+  = alpha^2 [sigma2_B_pair/N + (N-1)c_B_ABM/N
+             + Var_B_pair(q_j) - 2 Cov_B_pair(r,q_j)].
+```
+
+For `N=1`, both cross-opponent terms vanish and ABM `m11,c` remain undefined. The hybrid is explicitly diagnostic: it substitutes only the ABM finite-bin cross-opponent covariance and does not turn the pair closure into a standalone analytical covariance theory.
+
+ABM records use source `Q_t`, actions, old edge states, rewards, and selected velocities from step `t`. Pair summaries use `P_t` before the transport to `P_{t+1}`. The bounded runner simulates ABM records through the largest requested time plus one, advances one pair trajectory only through the largest requested source time, and labels the retained point summaries with their explicit source times. Pair and ABM times must match exactly; shifted labels are rejected. Both systems use the same authoritative tensors, `alpha`, `tau`, seeded legacy histogram, independently constructed pair endpoints, uniform initial state law, configured/effective bin edges, and selected-action order.
+
+The runner computes authoritative finest ABM and pair-bin raw sums once, reconstructs one configured coarser nested scheme at a time by exact addition, verifies ABM parent/child reconstruction, derives bounded comparison/bootstrap summaries, and releases that coarse sufficient state before continuing. It runs the ABM once, runs the pair trajectory once, and reuses the same ABM records, pair point summaries, and one `(bootstrap_replicate,run)` multiplicity matrix for every scheme, time, action, bin, and ABM-dependent estimand. Pair-only quantities are deterministic and receive no sampling interval. Direct ABM, reconstructed ABM, hybrid, and their discrepancies are recomputed after complete-run bootstrap pooling. The Phase 3B requirements of at least two contributing runs and at least `max(2,ceil(0.8B))` finite replicates remain unchanged; the quantile method, both thresholds and row-specific invalid replicate counts are explicit outputs. `abm_reconstruction_defined` means the reconstruction is finite for an occupied stratum; it is not a numerical closure-tolerance claim.
+
+The small runner retains no full pair-density history. Lowering and compilation create a runtime-only bundle containing the exact compiled callable, its analyzed memory fields, abstract arguments, static values, and backend/platform/device/x64 signature. After the static and compiled gates accept, that same callable is invoked once; the original jitted Python function is not called again. Immediately before invocation, a signature is independently rebuilt from the actual pair mass, grid leaves, `alpha`, `tau`, source-slot array and current runtime. It must match pair shape/dtype, grid arguments, step and summary counts, requested source times, complete slot map, chunk size, both validation tolerances, backend/platform/device identity and x64 state. For every `P_t` from zero through the largest requested time the scan records the authoritative Phase 4 lean diagnostics, records a `15M` point summary only when requested, then transports synchronously. A separate authoritative host validator checks the returned shapes, every diagnostic, final mass, symmetry and destinations; it never executes an alternative scan or step. The final density is returned; intermediate densities are not.
+
+At `L` requested source times and `M` focal grid points, source-summary storage is `15LMb` on device and `15LMb+2Mb+8L` on host. The combined scan returns the complete `(T+1)(11b+3)` diagnostic trajectory and `T` destination-validity booleans; device and host copies are both counted at transfer/validation and the device copies remain in retained pair outputs where applicable. If `C_l=L*Bc_l*Bd_l*2`, one pair scheme needs `56C_l+8(C_l/2)` bytes; only the authoritative finest plus the largest one-at-a-time coarse reconstruction coexist. Retained final comparisons are conservatively `512*sum_l C_l`, and eight ABM-dependent bootstrap arrays use `64B*max_l C_l`. Comparison and anchor dictionaries are streamed in deterministic order: a first non-retaining pass enforces a 16 KiB live-object and 8 KiB ASCII-record bound and accumulates smoke summaries, then output begins and a second pass writes one row at a time. No row list is retained. Maximum normalized-schema rows produced through the real iterators measured 14,579 live bytes/4,450 characters for the 91-column comparison row and 11,209 bytes/4,022 characters for the 68-column anchor row.
+
+The Phase 5 256 MiB guard is the maximum of explicit simultaneous lifetime peaks, not a sum of unrelated maxima. The phases are normalized configuration/scientific scheme validation, shape lowering/compilation, ABM simulation, pair execution with retained ABM data, pair device-to-host transfer and result validation, finest-plus-one-coarse reconstruction, aggregation, pooled point derivation, bootstrap chunk processing, bounded anchor accumulation, one streamed row, and Phase 5 serialization. Within output, JSON encoding, CSV writing, bootstrap-weight archive writing, and chunked metadata writing are alternative subpeaks. The bounded encoded metadata string remains live during the latter three and is counted there; their mutually exclusive temporary buffers are not added together. Metadata records every component, all serialization subpeaks, the static pair-kernel allowance, analyzed compiled device/host requirements, retained cross-phase arrays, all phase totals and the determining phase. Phase 4 kernel formulas are reused only for arrays created by this executable; Phase 4 runner-only serialization, source hashes and diagnostic dictionaries are excluded. Startup first parses the exact bounded schema, inspects list sizes with Python integers, and enforces raw/static caps. It then constructs `QBinSpec` arrays and validates configured/effective edges, observation-dtype collapse, configured/effective nesting and every anchor. Only after those scientific checks may it create the Q grid and lower the exact Phase 5 scan. Fail-closed compiled analysis and a repeated global check precede histogram sampling, pair/ABM allocation and simulation. The constructed grid must reproduce raw histogram counts. Only recorded `--allow-expensive` overrides resource failures; scientific matching and numerical validity checks remain mandatory. An unavailable or mismatched executable analysis is recorded as such, never as a pass.
 
 ## 23. Primary outputs, uncertainty, and scaling checks
 

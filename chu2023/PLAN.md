@@ -361,7 +361,7 @@ Exit gate:
 
 ## 9. Phase 5 - Initial four-way variance comparison
 
-Run the first scientific comparison at modest CPU-manageable scale before full GPU optimisation.
+Run the first scientific comparison at modest CPU-manageable scale before full GPU optimisation. This bounded milestone is implemented for reduced grids only.
 
 For selected times, actions, and sufficiently occupied Q-bins, perform four distinct checks:
 
@@ -376,26 +376,36 @@ For selected times, actions, and sufficiently occupied Q-bins, perform four dist
 
    For finite bins, first close the reward-variance identity, then account for Q dispersion/reward-Q covariance when comparing to raw velocity variance.
 3. **One-edge pair check:** compare `sigma_j,pair^2` with `sigma_j,ABM^2` under identical bin definitions and selected-action Q weights.
-4. **Theory comparison:** compare direct ABM variance with
+4. **Theory comparison:** compare direct ABM variance with the finite-bin raw-moment pair and hybrid predictions
 
    ```text
-   pure pair: alpha^2 sigma_j,pair^2/(n-1)
+   pure pair:
+     alpha^2 [sigma_j,pair^2/N + (N-1)c_j,pair/N
+              + Var_pair(q_j) - 2 Cov_pair(r,q_j)]
 
-   hybrid:    alpha^2 [sigma_j,pair^2/(n-1)
-                        + (n-2)c_j,ABM/(n-1)].
+   hybrid:
+     alpha^2 [sigma_j,pair^2/N + (N-1)c_j,ABM/N
+              + Var_pair(q_j) - 2 Cov_pair(r,q_j)].
    ```
+
+   Here `c_j,pair=E_B[mu(q,j)^2]-E_B[mu(q,j)]^2`; exact-Q conditional independence does not force this finite-bin mixing covariance to zero. The earlier `alpha^2 sigma^2/N` shorthand applies only at exact `q`.
 
 Tasks:
 
-1. Produce named, separate direct/decomposed/pure-pair/hybrid series; never overwrite one with another.
-2. For pair values in a bin, calculate both the matched pooled edge variance and the occupancy-weighted mean of local grid variances, and label the distinction.
-3. Compare multiple bin widths and minimum-count thresholds.
-4. Bootstrap or otherwise construct uncertainty intervals by run and focal-agent clusters, not by treating incident edges as independent observations.
-5. Diagnose whether discrepancies arise from the one-edge pair law, nonzero `c_j`, finite-bin effects, or more than one source.
+1. **Met.** Named direct/decomposed/pure-pair/hybrid arrays, discrepancies, guarded ratios and validity flags remain separate.
+2. **Met.** Pair exact-grid values are weighted by `p(q) pi_j(q)` and accumulated as raw mass, first/second/distinct, selected-Q and reward-Q sums before nonlinear finite-bin formulas. Both pooled `sigma^2` and the weighted mean of local exact-grid `sigma^2(q,j)` are retained.
+3. **Met.** Authoritative finest pair and ABM sufficient statistics reconstruct one nested coarser scheme at a time by raw addition; ABM parent/child sufficient statistics are independently reconstruction-checked and scheme-sized coarse arrays are released sequentially.
+4. **Met.** One complete-run multiplicity matrix is shared across every row, scheme and ABM-dependent estimand. Pair-only values are deterministic and receive no sampling interval.
+5. **Met.** The runner executes one ABM trajectory batch and the exact compiled `lax.scan` object whose memory report passed, retains no full pair-density history, and labels every requested source `t` against `P_t` before transport. A runtime-only bundle holds that callable, abstract/static compile facts and backend/device/x64 identity; an independently rebuilt invocation signature must match before the one call.
+6. **Met.** Immutable Phase 2, 3B, 4-kernel and additional Phase 5 resource gates run before allocation-sensitive work. Complete effective-bin/nesting/anchor validation precedes JAX lowering. Exact executable analysis then fails closed before histogram, pair or ABM allocation. The Phase 5-specific lifetime model reports configuration, compilation, ABM, pair execution, pair transfer/validation, reconstruction, aggregation, pooled, bootstrap, anchor, streamed-row and serialization peaks; it counts `(T+1)` diagnostic rows and `T` destination-validity booleans on device and host without importing Phase 4 runner-only output buffers. Serialization takes the maximum of JSON encoding, CSV, weight-archive and metadata-write subphases while counting the encoded metadata string wherever it remains live.
+7. The smoke configuration compares source times `0,1`, two nested bin schemes and both actions with the same model, population, legacy histogram seed and uniform initial state law.
 
 Exit gate:
 
-- The four checks can be interpreted independently, use matched conditioning/weights, and answer whether empirical `c_j` materially explains the pair-closure discrepancy in the small baseline case.
+- **Met for the bounded pipeline, not as a production scientific conclusion.** The four checks are independently named and matched, exact ABM reconstruction closes to floating-point error, and the smoke output reports whether the empirical covariance correction moves the diagnostic hybrid. Full-grid, convergence and inferential conclusions remain later work.
+- The real 91-column comparison and 68-column anchor iterators are tested at the maximum normalized configuration size. Their observed maxima (14,579/11,209 live Python bytes and 4,450/4,022 ASCII characters) fit the fixed 16 KiB live-row and 8 KiB record bounds; acceptance at the measured boundary and rejection one byte below are covered independently.
+- Repeated one-step and combined-scan summaries agree at source times `0,2,3` on a heterogeneous symmetric mass: maximum differences are `1.4901161193847656e-08` in float32 and `2.7755575615628914e-17` in CPU+x64, with identical final masses.
+- The Phase 5 focused suite gives `48 passed, 1 skipped` by default and `49 passed` in CPU+x64. On 2026-08-20 the complete warnings-as-errors suite gives `266 passed, 5 skipped` by default and `271 passed` in a fresh CPU+x64 process.
 
 ## 10. Phase 6 - Pair transport policy and CPU grid convergence
 

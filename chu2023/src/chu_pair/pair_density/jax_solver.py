@@ -92,6 +92,19 @@ class JAXOneEdgeMoments(NamedTuple):
     occupied: jax.Array
 
 
+class JAXPairPointSufficient(NamedTuple):
+    """Exact-grid selected-action raw sums for bounded Phase 5 comparison."""
+
+    focal_mass: jax.Array
+    selected_mass: jax.Array
+    sum_y: jax.Array
+    sum_y2: jax.Array
+    sum_distinct_y: jax.Array
+    sum_q: jax.Array
+    sum_q2: jax.Array
+    sum_y_q: jax.Array
+
+
 class JAXConditionalDynamics(NamedTuple):
     focal_mass: jax.Array
     expected_payoff: jax.Array
@@ -122,6 +135,15 @@ class JAXPairDiagnostics(NamedTuple):
 
 class JAXPairSimulationResult(NamedTuple):
     final_mass: jax.Array
+    diagnostics: JAXPairDiagnostics
+    destinations_valid: jax.Array
+
+
+class JAXPairSourceSimulationResult(NamedTuple):
+    """Bounded source summaries plus lean diagnostics from one compiled scan."""
+
+    final_mass: jax.Array
+    source_summaries: JAXPairPointSufficient
     diagnostics: JAXPairDiagnostics
     destinations_valid: jax.Array
 
@@ -294,6 +316,35 @@ def one_edge_moments_jax(
     second = jnp.einsum("msb,sab->ma", weights, payoff * payoff)
     variance = second - mean * mean
     return JAXOneEdgeMoments(focal, weights, mean, second, variance, occupied)
+
+
+def pair_point_sufficient_jax(
+    pair_mass: jax.Array,
+    grid: JAXPairGrid,
+    tau,
+) -> JAXPairPointSufficient:
+    """Return exact-focal-Q raw selected-action sums without binning.
+
+    Conditional independence is applied only at an exact focal point, where the
+    distinct-opponent product is ``mu(q,j)**2``.  Finite-bin nonlinear moments
+    are deliberately deferred until these weighted raw sums have been pooled.
+    """
+
+    mass = jnp.asarray(pair_mass)
+    moments = one_edge_moments_jax(mass, grid, tau)
+    policy = _policy(grid, tau, mass.dtype)
+    selected_mass = moments.focal_mass[:, None] * policy
+    q_selected = grid.q_points.astype(mass.dtype)
+    return JAXPairPointSufficient(
+        focal_mass=moments.focal_mass,
+        selected_mass=selected_mass,
+        sum_y=selected_mass * moments.mean,
+        sum_y2=selected_mass * moments.second,
+        sum_distinct_y=selected_mass * moments.mean * moments.mean,
+        sum_q=selected_mass * q_selected,
+        sum_q2=selected_mass * q_selected * q_selected,
+        sum_y_q=selected_mass * moments.mean * q_selected,
+    )
 
 
 def conditional_dynamics_jax(
@@ -561,6 +612,317 @@ simulate_pair_density_jit = partial(
     jax.jit,
     static_argnames=("steps", "chunk_size"),
 )(simulate_pair_density_jax)
+
+
+def simulate_pair_source_summaries_jax(
+    initial_mass: jax.Array,
+    grid: JAXPairGrid,
+    alpha,
+    tau,
+    source_slot_by_time: jax.Array,
+    *,
+    steps: int,
+    summary_count: int,
+    chunk_size: int,
+    diagnostic_tolerance,
+) -> JAXPairSourceSimulationResult:
+    """Scan from ``P_0`` and retain only requested source summaries.
+
+    ``source_slot_by_time[t]`` is ``-1`` when ``P_t`` is not requested and is
+    otherwise the output slot for its point-sufficient summary. Diagnostics are
+    retained for every ``P_t``, including the initial and final masses; no full
+    density trajectory is retained.
+    """
+
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+        raise ValueError("steps must be a non-negative integer")
+    if (
+        isinstance(summary_count, bool)
+        or not isinstance(summary_count, int)
+        or summary_count < 1
+    ):
+        raise ValueError("summary_count must be a positive integer")
+    slots = jnp.asarray(source_slot_by_time)
+    if slots.shape != (steps + 1,) or not jnp.issubdtype(slots.dtype, jnp.integer):
+        raise ValueError("source_slot_by_time must be an integer array of length steps + 1")
+
+    points = grid.agent_point_count
+    dtype = initial_mass.dtype
+    summaries = JAXPairPointSufficient(
+        focal_mass=jnp.zeros((summary_count, points), dtype=dtype),
+        selected_mass=jnp.zeros((summary_count, points, 2), dtype=dtype),
+        sum_y=jnp.zeros((summary_count, points, 2), dtype=dtype),
+        sum_y2=jnp.zeros((summary_count, points, 2), dtype=dtype),
+        sum_distinct_y=jnp.zeros((summary_count, points, 2), dtype=dtype),
+        sum_q=jnp.zeros((summary_count, points, 2), dtype=dtype),
+        sum_q2=jnp.zeros((summary_count, points, 2), dtype=dtype),
+        sum_y_q=jnp.zeros((summary_count, points, 2), dtype=dtype),
+    )
+
+    def record_source(mass, stored, slot):
+        def record(_):
+            point = pair_point_sufficient_jax(mass, grid, tau)
+            return jax.tree_util.tree_map(
+                lambda destination, value: destination.at[slot].set(value),
+                stored,
+                point,
+            )
+
+        return jax.lax.cond(slot >= 0, record, lambda _: stored, operand=None)
+
+    def body(carry, time_index):
+        mass, stored = carry
+        stored = record_source(mass, stored, slots[time_index])
+        diagnostics = pair_diagnostics_jax(
+            mass, grid, tau, tolerance=diagnostic_tolerance
+        )
+        step = pair_mass_step_jax(
+            mass, grid, alpha, tau, chunk_size=chunk_size
+        )
+        return (step.mass, stored), (diagnostics, step.destinations_valid)
+
+    (final_mass, summaries), (diagnostic_history, destinations_valid) = jax.lax.scan(
+        body,
+        (initial_mass, summaries),
+        jnp.arange(steps, dtype=jnp.int32),
+    )
+    summaries = record_source(final_mass, summaries, slots[steps])
+    final_diagnostics = pair_diagnostics_jax(
+        final_mass, grid, tau, tolerance=diagnostic_tolerance
+    )
+    diagnostics = jax.tree_util.tree_map(
+        lambda history, final: jnp.concatenate((history, final[None]), axis=0),
+        diagnostic_history,
+        final_diagnostics,
+    )
+    return JAXPairSourceSimulationResult(
+        final_mass, summaries, diagnostics, destinations_valid
+    )
+
+
+simulate_pair_source_summaries_jit = partial(
+    jax.jit,
+    static_argnames=("steps", "summary_count", "chunk_size"),
+)(simulate_pair_source_summaries_jax)
+
+
+def validate_pair_source_diagnostics(
+    diagnostics: JAXPairDiagnostics,
+    destinations_valid,
+    *,
+    diagnostic_tolerance: float,
+    symmetry_tolerance: float,
+) -> None:
+    """Apply the configured Phase 4 conditions to every retained ``P_t``."""
+
+    if not math.isfinite(diagnostic_tolerance) or diagnostic_tolerance < 0:
+        raise ValueError("diagnostic_tolerance must be finite and non-negative")
+    if not math.isfinite(symmetry_tolerance) or symmetry_tolerance < 0:
+        raise ValueError("symmetry_tolerance must be finite and non-negative")
+    host = jax.device_get(diagnostics)
+    if not bool(np.all(np.asarray(destinations_valid, dtype=bool))):
+        raise GridBoundsError("legacy projected destination lies outside the JAX pair grid")
+    if not bool(np.all(np.asarray(host.finite, dtype=bool))):
+        raise ValueError("pair trajectory contains non-finite mass")
+    if not bool(np.all(np.asarray(host.nonnegative, dtype=bool))):
+        raise ValueError("pair trajectory contains negative mass beyond diagnostic_tolerance")
+    if bool(np.any(np.abs(np.asarray(host.total_mass) - 1.0) > diagnostic_tolerance)):
+        raise ValueError("pair trajectory mass error exceeds diagnostic_tolerance")
+    if bool(np.any(np.asarray(host.symmetry_error) > symmetry_tolerance)):
+        raise PairSymmetryError("pair trajectory lost endpoint exchange symmetry")
+    if bool(
+        np.any(np.asarray(host.conditional_weight_error) > diagnostic_tolerance)
+    ):
+        raise ValueError("conditional-weight error exceeds diagnostic_tolerance")
+    if bool(
+        np.any(np.asarray(host.minimum_conditional_variance) < -diagnostic_tolerance)
+    ):
+        raise ValueError("conditional variance is below -diagnostic_tolerance")
+    if not bool(np.all(np.asarray(host.conditional_moments_valid, dtype=bool))):
+        raise ValueError("pair trajectory contains invalid conditional moments")
+
+
+def checked_simulate_pair_source_summaries(
+    initial_mass,
+    grid: JAXPairGrid,
+    alpha,
+    tau,
+    source_slot_by_time,
+    *,
+    steps: int,
+    summary_count: int,
+    chunk_size: int,
+    symmetry_tolerance: float,
+    diagnostic_tolerance: float,
+    max_elements: int | None = DEFAULT_MAX_JAX_PAIR_ELEMENTS,
+) -> JAXPairSourceSimulationResult:
+    """Run and validate the jitted Phase 5 function outside guarded runners."""
+
+    validated, slots = prepare_pair_source_inputs(
+        initial_mass,
+        grid,
+        alpha,
+        tau,
+        source_slot_by_time,
+        steps=steps,
+        summary_count=summary_count,
+        symmetry_tolerance=symmetry_tolerance,
+        max_elements=max_elements,
+    )
+    result = simulate_pair_source_summaries_jit(
+        validated,
+        grid,
+        alpha,
+        tau,
+        slots,
+        steps=steps,
+        summary_count=summary_count,
+        chunk_size=chunk_size,
+        diagnostic_tolerance=diagnostic_tolerance,
+    )
+    return validate_pair_source_result(
+        result,
+        grid,
+        steps=steps,
+        summary_count=summary_count,
+        diagnostic_tolerance=diagnostic_tolerance,
+        symmetry_tolerance=symmetry_tolerance,
+        max_elements=max_elements,
+    )
+
+
+def prepare_pair_source_inputs(
+    initial_mass,
+    grid: JAXPairGrid,
+    alpha,
+    tau,
+    source_slot_by_time,
+    *,
+    steps: int,
+    summary_count: int,
+    symmetry_tolerance: float,
+    max_elements: int | None = DEFAULT_MAX_JAX_PAIR_ELEMENTS,
+) -> tuple[jax.Array, jax.Array]:
+    """Validate runtime inputs without selecting or compiling an executable."""
+
+    _validate_learning_scalars(alpha, tau)
+    slots = np.asarray(jax.device_get(source_slot_by_time))
+    if slots.shape != (steps + 1,) or not np.issubdtype(slots.dtype, np.integer):
+        raise ValueError("source_slot_by_time must be an integer array of length steps + 1")
+    if np.any(slots < -1) or np.any(slots >= summary_count):
+        raise ValueError("source slots must be -1 or valid summary indices")
+    if not np.array_equal(
+        np.sort(slots[slots >= 0]), np.arange(summary_count, dtype=slots.dtype)
+    ):
+        raise ValueError("every summary slot must occur exactly once")
+    validated = validate_jax_pair_mass(
+        initial_mass,
+        grid,
+        symmetry_tolerance=symmetry_tolerance,
+        max_elements=max_elements,
+    )
+    return validated, jnp.asarray(slots)
+
+
+def validate_pair_source_result(
+    result: JAXPairSourceSimulationResult,
+    grid: JAXPairGrid,
+    *,
+    steps: int,
+    summary_count: int,
+    diagnostic_tolerance: float,
+    symmetry_tolerance: float,
+    max_elements: int | None = DEFAULT_MAX_JAX_PAIR_ELEMENTS,
+) -> JAXPairSourceSimulationResult:
+    """Validate outputs from an already executed pair-source executable."""
+
+    points = grid.agent_point_count
+    if result.final_mass.shape != (2, points, points):
+        raise ValueError("compiled final pair mass has an unexpected shape")
+    if result.source_summaries.focal_mass.shape != (summary_count, points):
+        raise ValueError("compiled focal source summary has an unexpected shape")
+    for name in (
+        "selected_mass",
+        "sum_y",
+        "sum_y2",
+        "sum_distinct_y",
+        "sum_q",
+        "sum_q2",
+        "sum_y_q",
+    ):
+        if getattr(result.source_summaries, name).shape != (summary_count, points, 2):
+            raise ValueError(f"compiled source summary {name} has an unexpected shape")
+    if result.diagnostics.total_mass.shape != (steps + 1,):
+        raise ValueError("compiled diagnostic trajectory has an unexpected length")
+    if result.destinations_valid.shape != (steps,):
+        raise ValueError("compiled destination-validity trajectory has an unexpected length")
+    validate_pair_source_diagnostics(
+        result.diagnostics,
+        result.destinations_valid,
+        diagnostic_tolerance=diagnostic_tolerance,
+        symmetry_tolerance=symmetry_tolerance,
+    )
+    if max_elements is not None and result.final_mass.size > max_elements:
+        raise MemoryError("compiled final pair mass exceeds its validation limit")
+    host_mass = np.asarray(jax.device_get(result.final_mass))
+    if not np.all(np.isfinite(host_mass)):
+        raise ValueError("compiled final pair mass contains non-finite values")
+    if float(np.min(host_mass, initial=0.0)) < -diagnostic_tolerance:
+        raise ValueError("compiled final pair mass is negative beyond diagnostic_tolerance")
+    if abs(float(host_mass.sum()) - 1.0) > diagnostic_tolerance:
+        raise ValueError("compiled final pair mass error exceeds diagnostic_tolerance")
+    symmetry_error = float(
+        np.max(np.abs(host_mass - host_mass.transpose(0, 2, 1)), initial=0.0)
+    )
+    if symmetry_error > symmetry_tolerance:
+        raise PairSymmetryError("compiled final pair mass lost endpoint exchange symmetry")
+    return result
+
+
+def execute_compiled_pair_source_summaries(
+    compiled_callable,
+    initial_mass,
+    grid: JAXPairGrid,
+    alpha,
+    tau,
+    source_slot_by_time,
+    *,
+    steps: int,
+    summary_count: int,
+    symmetry_tolerance: float,
+    diagnostic_tolerance: float,
+    max_elements: int | None = DEFAULT_MAX_JAX_PAIR_ELEMENTS,
+) -> JAXPairSourceSimulationResult:
+    """Invoke one injected compiled callable exactly once, then validate outputs."""
+
+    validated, slots = prepare_pair_source_inputs(
+        initial_mass,
+        grid,
+        alpha,
+        tau,
+        source_slot_by_time,
+        steps=steps,
+        summary_count=summary_count,
+        symmetry_tolerance=symmetry_tolerance,
+        max_elements=max_elements,
+    )
+    result = compiled_callable(
+        validated,
+        grid,
+        alpha,
+        tau,
+        slots,
+        diagnostic_tolerance=diagnostic_tolerance,
+    )
+    return validate_pair_source_result(
+        result,
+        grid,
+        steps=steps,
+        summary_count=summary_count,
+        diagnostic_tolerance=diagnostic_tolerance,
+        symmetry_tolerance=symmetry_tolerance,
+        max_elements=max_elements,
+    )
 
 
 def checked_pair_mass_step(
