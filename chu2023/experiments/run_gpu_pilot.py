@@ -368,12 +368,11 @@ def main() -> int:
                 raise ValueError("full-grid analysis artifact lacks its exact executable signature") from error
         for case_estimate in resource["cases"]:
             for variant in _stage_variants(stage, configuration):
-                records.append(
-                    compile_and_maybe_execute_case(
-                        variant, grid_size=int(case_estimate["grid_size"]),
-                        static_estimate=case_estimate, execute=execute_case,
-                        expected_signature_sha256=expected_signature,
-                    )
+                compile_and_maybe_execute_case(
+                    variant, grid_size=int(case_estimate["grid_size"]),
+                    static_estimate=case_estimate, execute=execute_case,
+                    expected_signature_sha256=expected_signature,
+                    record_sink=records,
                 )
                 payload["event_log"].append(
                     {
@@ -398,7 +397,25 @@ def main() -> int:
             {"event": "stage_succeeded", "utc": datetime.now(timezone.utc).isoformat()}
         )
     except BaseException as error:
+        failed_elapsed = time.perf_counter() - start
         payload["error"] = {"type": type(error).__name__, "message": str(error)[:1024]}
+        # A failed stage still consumed billable time; report the defensible
+        # elapsed-time estimate rather than leaving cost silent.
+        payload["cost"] = {
+            "claim_scope": (
+                "estimate from elapsed wall time and user-supplied instance price "
+                "up to the failure; not billing data"
+            ),
+            "status": "failed",
+            "elapsed_seconds": failed_elapsed,
+            "hourly_price_usd_user_supplied": configuration.hourly_price_usd,
+            "estimated_compute_cost_usd": failed_elapsed / 3600.0 * configuration.hourly_price_usd,
+            "prior_cumulative_stage_estimate_usd": prior_cumulative_cost,
+            "cumulative_stage_estimate_usd": (
+                prior_cumulative_cost + failed_elapsed / 3600.0 * configuration.hourly_price_usd
+            ),
+            "configured_session_budget_usd": configuration.max_session_cost_usd,
+        }
         payload["event_log"].append(
             {"event": "stage_failed", "utc": datetime.now(timezone.utc).isoformat()}
         )

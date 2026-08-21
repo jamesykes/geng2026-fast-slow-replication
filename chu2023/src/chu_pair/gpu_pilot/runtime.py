@@ -197,9 +197,64 @@ def compile_and_maybe_execute_case(
     static_estimate: dict[str, object],
     execute: bool,
     expected_signature_sha256: str | None = None,
+    record_sink: list | None = None,
 ) -> dict[str, object]:
-    """Lower, compile, completely analyze, capacity-gate, then optionally invoke."""
+    """Lower, compile, completely analyze, capacity-gate, then optionally invoke.
 
+    The record is published to ``record_sink`` before any work starts and is
+    filled in as evidence is obtained, so a failure part-way through still
+    leaves the compiled-memory, capacity and timing facts already established
+    inside the atomic stage artifact instead of discarding them.
+    """
+
+    record: dict[str, object] = {
+        "grid_size": grid_size, "steps": configuration.steps,
+        "kernels": {}, "invoked": False,
+        "phases": {
+            "input_construction": "not_reached",
+            "scientific_validation": "not_reached",
+            "parity": "not_reached",
+        },
+    }
+    if record_sink is not None:
+        record_sink.append(record)
+    progress = {"kernel": None, "phase": "case_preflight"}
+    try:
+        return _run_case(
+            configuration, grid_size=grid_size, static_estimate=static_estimate,
+            execute=execute, expected_signature_sha256=expected_signature_sha256,
+            record=record, progress=progress,
+        )
+    except BaseException as error:
+        kernel, phase = progress["kernel"], progress["phase"]
+        # Mark the phase wherever it is tracked: per-kernel phases for the
+        # compile/admit/invoke sequence, case phases for the shared steps.
+        candidates = []
+        if kernel is not None and kernel in record["kernels"]:
+            candidates.append(record["kernels"][kernel]["phases"])
+        candidates.append(record["phases"])
+        for phases in candidates:
+            if phase in phases:
+                phases[phase] = "failed"
+                break
+        record["failure"] = {
+            "stage": configuration.stage.value, "grid_size": grid_size,
+            "steps": configuration.steps, "kernel": kernel, "phase": phase,
+            "type": type(error).__name__, "message": str(error)[:512],
+        }
+        raise
+
+
+def _run_case(
+    configuration: PilotConfiguration,
+    *,
+    grid_size: int,
+    static_estimate: dict[str, object],
+    execute: bool,
+    expected_signature_sha256: str | None,
+    record: dict[str, object],
+    progress: dict[str, object],
+) -> dict[str, object]:
     if jax.default_backend() != "gpu":
         raise RuntimeError("pilot numerical stages require a JAX GPU backend")
     dtype = jnp.float32 if configuration.dtype == "float32" else jnp.float64
@@ -219,6 +274,16 @@ def compile_and_maybe_execute_case(
     kernels = ("flat", "separable") if configuration.stage.value == "small" else ("separable",)
     compiled = {}
     for kernel in kernels:
+        kernel_record: dict[str, object] = {
+            "invoked": False,
+            "phases": {
+                "lowering": "not_reached", "compilation": "not_reached",
+                "memory_analysis": "not_reached", "capacity_admission": "not_reached",
+                "invocation": "not_reached",
+            },
+        }
+        record["kernels"][kernel] = kernel_record
+        progress.update(kernel=kernel, phase="lowering")
         static = {
             "steps": configuration.steps,
             "summary_count": len(configuration.source_times),
@@ -232,6 +297,8 @@ def compile_and_maybe_execute_case(
             abstract_histogram, abstract_states, abstract_grid,
             configuration.alpha, configuration.tau, abstract_slots, **static,
         )
+        kernel_record["phases"]["lowering"] = "passed"
+        progress["phase"] = "compilation"
         signature = benchmark.executable_signature(
             case, model, histogram=abstract_histogram,
             state_probabilities=abstract_states, grid=abstract_grid,
@@ -252,7 +319,16 @@ def compile_and_maybe_execute_case(
             validate_analyzed_signature_match(
                 expected_signature_sha256, bundle.signature_sha256
             )
+        kernel_record["phases"]["compilation"] = "passed"
+        kernel_record["compile_seconds"] = compile_seconds
+        progress["phase"] = "memory_analysis"
         report = validate_compiled_executable_bundle(bundle)
+        kernel_record["phases"]["memory_analysis"] = "passed"
+        kernel_record["compiled_memory_report"] = {
+            key: value for key, value in report.items() if key != "executable_signature"
+        }
+        kernel_record["executable_signature_sha256"] = bundle.signature_sha256
+        progress["phase"] = "capacity_admission"
         feasibility = {
             "state_expanded_cells": case["state_expanded_cells"],
             "safety_margin_fraction": configuration.safety_margin_fraction,
@@ -276,26 +352,15 @@ def compile_and_maybe_execute_case(
                 feasibility=feasibility, bundle=bundle,
                 capacity_observation=capacity,
             )
+        kernel_record["phases"]["capacity_admission"] = "passed"
+        kernel_record["capacity_preflight"] = capacity_gate
         compiled[kernel] = {
             "bundle": bundle, "signature": signature, "feasibility": feasibility,
-            "record": {
-                "compile_seconds": compile_seconds,
-                "compiled_memory_report": {
-                    key: value for key, value in report.items() if key != "executable_signature"
-                },
-                "executable_signature_sha256": bundle.signature_sha256,
-                "capacity_preflight": capacity_gate,
-                "invoked": False,
-            },
+            "record": kernel_record,
         }
-    record: dict[str, object] = {
-        "grid_size": grid_size,
-        "steps": configuration.steps,
-        "kernels": {kernel: entry["record"] for kernel, entry in compiled.items()},
-        "invoked": False,
-    }
     if not execute:
         return record
+    progress.update(kernel=None, phase="input_construction")
 
     # Only after exact compiled analysis and capacity admission do any device
     # initialization inputs exist. The combined executable constructs P0 itself.
@@ -310,12 +375,14 @@ def compile_and_maybe_execute_case(
     arguments = (
         histogram, states, device_grid, configuration.alpha, configuration.tau, slots,
     )
+    record["phases"]["input_construction"] = "passed"
     repetitions = _REPETITIONS[configuration.stage.value]
     outputs = {}
     for repetition in range(repetitions):
         order = kernels if repetition % 2 == 0 else tuple(reversed(kernels))
         for kernel in order:
             entry = compiled[kernel]
+            progress.update(kernel=kernel, phase="invocation")
             fresh_capacity = _capacity_observation(entry["signature"], post_initialization=True)
             post_capacity = post_initialization_capacity_preflight(
                 feasibility=entry["feasibility"], bundle=entry["bundle"],
@@ -343,7 +410,11 @@ def compile_and_maybe_execute_case(
                 )
             if sampler.error:
                 kernel_record.setdefault("gpu_memory_telemetry_errors", []).append(sampler.error)
+    for kernel in outputs:
+        compiled[kernel]["record"]["phases"]["invocation"] = "passed"
+    progress.update(kernel=None, phase="scientific_validation")
     for kernel, result in outputs.items():
+        progress["kernel"] = kernel
         validate_pair_source_diagnostics(
             result.diagnostics, result.destinations_valid,
             diagnostic_tolerance=configuration.diagnostic_tolerance,
@@ -363,6 +434,8 @@ def compile_and_maybe_execute_case(
             mad_execution_seconds=float(np.median(np.abs(sample_array - median))),
             scientific_diagnostics=_scientific_summary(result),
         )
+    record["phases"]["scientific_validation"] = "passed"
+    progress.update(kernel=None, phase="parity")
     parity = None
     if kernels == ("flat", "separable"):
         parity = {
@@ -375,5 +448,6 @@ def compile_and_maybe_execute_case(
         }
         if max(parity.values()) > configuration.diagnostic_tolerance:
             raise RuntimeError(f"small GPU flat/separable parity failed: {parity}")
+    record["phases"]["parity"] = "passed"
     record.update(invoked=True, parity=parity)
     return record

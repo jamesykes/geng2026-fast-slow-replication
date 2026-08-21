@@ -494,3 +494,150 @@ def test_configuration_parsing_stays_free_of_jax() -> None:
     result = json.loads(completed.stdout.strip().splitlines()[-1])
     assert result["precision"] == "highest"
     assert result["jax_imported"] is False
+
+
+def _failing_case_payload(monkeypatch, *, fail_at: str):
+    """Drive the real record-keeping with a stubbed case that fails at a phase."""
+
+    from chu_pair.gpu_pilot import runtime
+
+    def fake_run_case(configuration, *, grid_size, static_estimate, execute,
+                      expected_signature_sha256, record, progress):
+        kernel_record = {
+            "invoked": False,
+            "phases": {
+                "lowering": "not_reached", "compilation": "not_reached",
+                "memory_analysis": "not_reached", "capacity_admission": "not_reached",
+                "invocation": "not_reached",
+            },
+        }
+        record["kernels"]["flat"] = kernel_record
+        progress.update(kernel="flat", phase="lowering")
+        if fail_at == "lowering":
+            raise RuntimeError("lowering exploded")
+        kernel_record["phases"]["lowering"] = "passed"
+        progress["phase"] = "compilation"
+        kernel_record["phases"]["compilation"] = "passed"
+        kernel_record["compile_seconds"] = 1.25
+        progress["phase"] = "memory_analysis"
+        kernel_record["phases"]["memory_analysis"] = "passed"
+        kernel_record["compiled_memory_report"] = {"compiled_device_requirement_bytes": 4096}
+        kernel_record["executable_signature_sha256"] = "f" * 64
+        progress["phase"] = "capacity_admission"
+        if fail_at == "capacity_admission":
+            raise ValueError("capacity refused")
+        kernel_record["phases"]["capacity_admission"] = "passed"
+        kernel_record["capacity_preflight"] = {"passed": True}
+        progress.update(kernel=None, phase="input_construction")
+        record["phases"]["input_construction"] = "passed"
+        progress.update(kernel="flat", phase="invocation")
+        kernel_record["phases"]["invocation"] = "passed"
+        kernel_record["execution_seconds"] = [0.5]
+        progress.update(kernel="flat", phase="scientific_validation")
+        if fail_at == "scientific_validation":
+            raise ValueError("conditional-weight error exceeds diagnostic_tolerance")
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(runtime, "_run_case", fake_run_case)
+    configuration = load_pilot_configuration(PROJECT_ROOT / "configs/gpu_pilot_small.toml")
+    sink: list = []
+    with pytest.raises((RuntimeError, ValueError)):
+        runtime.compile_and_maybe_execute_case(
+            configuration, grid_size=3, static_estimate={}, execute=True,
+            record_sink=sink,
+        )
+    assert len(sink) == 1
+    return sink[0]
+
+
+def test_failed_case_retains_partial_evidence_before_invocation(monkeypatch) -> None:
+    """A pre-invocation failure keeps every fact already established."""
+
+    record = _failing_case_payload(monkeypatch, fail_at="capacity_admission")
+    assert record["failure"]["phase"] == "capacity_admission"
+    assert record["failure"]["kernel"] == "flat"
+    assert record["failure"]["type"] == "ValueError"
+    assert record["failure"]["grid_size"] == 3
+    kernel = record["kernels"]["flat"]
+    # Evidence obtained before the failure survives.
+    assert kernel["compile_seconds"] == 1.25
+    assert kernel["compiled_memory_report"]["compiled_device_requirement_bytes"] == 4096
+    assert kernel["executable_signature_sha256"] == "f" * 64
+    # The three states are distinguishable.
+    assert kernel["phases"]["compilation"] == "passed"
+    assert kernel["phases"]["capacity_admission"] == "failed"
+    assert kernel["phases"]["invocation"] == "not_reached"
+    assert record["phases"]["input_construction"] == "not_reached"
+    assert record["invoked"] is False
+
+
+def test_failed_case_retains_partial_evidence_after_invocation(monkeypatch) -> None:
+    """A post-invocation failure keeps timings and admission evidence."""
+
+    record = _failing_case_payload(monkeypatch, fail_at="scientific_validation")
+    assert record["failure"]["phase"] == "scientific_validation"
+    kernel = record["kernels"]["flat"]
+    assert kernel["phases"]["invocation"] == "passed"
+    assert kernel["execution_seconds"] == [0.5]
+    assert kernel["capacity_preflight"] == {"passed": True}
+    assert record["phases"]["input_construction"] == "passed"
+    assert record["phases"]["scientific_validation"] == "failed"
+    assert record["phases"]["parity"] == "not_reached"
+
+
+def test_earliest_failure_still_publishes_a_located_record(monkeypatch) -> None:
+    """Even a first-phase failure yields a located, bounded record."""
+
+    record = _failing_case_payload(monkeypatch, fail_at="lowering")
+    assert record["failure"]["phase"] == "lowering"
+    assert record["kernels"]["flat"]["phases"]["lowering"] == "failed"
+    assert record["kernels"]["flat"]["phases"]["compilation"] == "not_reached"
+    assert "compiled_memory_report" not in record["kernels"]["flat"]
+    encoded = json.dumps(record, ensure_ascii=True, sort_keys=True)
+    assert len(encoded.encode("ascii")) < 8 * 1024
+
+
+def test_partial_failure_artifact_is_never_a_valid_prerequisite(tmp_path) -> None:
+    """Retained partial evidence must not make a failed stage admissible."""
+
+    payload = {
+        "schema_version": 1, "stage": "small", "status": "failed",
+        "completed_utc": datetime.now(timezone.utc).isoformat(),
+        "git_commit": "a" * 40, "environment_sha256": "b" * 64,
+        "records": [{"grid_size": 3, "invoked": False,
+                     "failure": {"phase": "capacity_admission"}}],
+    }
+    path = write_stage_artifact_atomic(tmp_path / "partial", payload)
+    document = json.loads(path.read_text())
+    assert document["status"] == "failed"
+    assert document["records"][0]["failure"]["phase"] == "capacity_admission"
+    with pytest.raises(ValueError, match="did not succeed"):
+        read_prerequisite_artifact(
+            path, required_stage=PilotStage.SMALL, commit="a" * 40,
+            environment_sha256="b" * 64,
+        )
+    # The artifact is written atomically: no temporary file is left behind.
+    assert [entry.name for entry in (tmp_path / "partial").iterdir()] == ["stage.json"]
+
+
+def test_successful_case_record_shape_is_unchanged(monkeypatch) -> None:
+    """Hardening must not alter what a successful record reports."""
+
+    from chu_pair.gpu_pilot import runtime
+
+    def fake_run_case(configuration, *, grid_size, static_estimate, execute,
+                      expected_signature_sha256, record, progress):
+        record["kernels"]["separable"] = {"invoked": True, "phases": {}}
+        record.update(invoked=True, parity=None)
+        return record
+
+    monkeypatch.setattr(runtime, "_run_case", fake_run_case)
+    configuration = load_pilot_configuration(PROJECT_ROOT / "configs/gpu_pilot_small.toml")
+    sink: list = []
+    result = runtime.compile_and_maybe_execute_case(
+        configuration, grid_size=3, static_estimate={}, execute=True, record_sink=sink,
+    )
+    assert result is sink[0]
+    assert result["invoked"] is True
+    assert "failure" not in result
+    assert result["parity"] is None
