@@ -81,6 +81,10 @@ class DeviceCapacityObservation:
     # process.  Keep that fact explicit rather than treating the remaining
     # global free bytes as unavailable to an already-created JAX pool.
     current_process_owned_bytes: int | None = None
+    # Pre-initialization evidence describes memory the JAX allocator has not
+    # reserved yet; post-initialization evidence describes the pool this
+    # process already owns.  The two are never interchangeable.
+    post_initialization: bool = False
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,7 @@ class AllocatorCapacityObservation:
     internal_free_bytes: int | None
     source: str
     unavailable_reason: str | None = None
+    largest_free_block_status: str = "reported"
 
 
 def _canonical_digest(value: Mapping[str, object]) -> str:
@@ -442,8 +447,19 @@ def make_device_capacity_observation(
     allocator_reserved_bytes: int | None = None,
     allocator_available_bytes: int | None = None,
     allocator_policy: str = "injected provider; no additional allocator constraint reported",
+    post_initialization: bool = False,
+    process_pool_bytes: int | None = None,
+    allocator_internal_free_bytes: int | None = None,
 ) -> DeviceCapacityObservation:
-    """Construct verified evidence and derive a conservative usable-byte value."""
+    """Construct verified evidence and derive a conservative usable-byte value.
+
+    Before the JAX allocator reserves its pool, the usable quantity is physical
+    free memory, optionally capped by the configured preallocation target.
+    Once this process owns the pool, the bytes an executable can actually draw
+    on are the pool's own internal free bytes; the external free memory left
+    beside the reservation is a different pool and adding or intersecting the
+    two would double count this process's own reservation.
+    """
 
     byte_values = {
         "total_physical_bytes": total_physical_bytes,
@@ -464,13 +480,34 @@ def make_device_capacity_observation(
             isinstance(value, bool) or not isinstance(value, int) or value < 0
         ):
             raise ValueError(f"{name} must be a non-negative integer or None")
-    usable = free_bytes
-    definition = "current free physical bytes reported for the matched device"
-    if allocator_available_bytes is not None:
-        usable = min(usable, allocator_available_bytes)
+    for name, value in {
+        "process_pool_bytes": process_pool_bytes,
+        "allocator_internal_free_bytes": allocator_internal_free_bytes,
+    }.items():
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+        ):
+            raise ValueError(f"{name} must be a non-negative integer or None")
+    if post_initialization:
+        if allocator_internal_free_bytes is None:
+            raise ValueError(
+                "post-initialization capacity requires allocator internal free bytes"
+            )
+        usable = allocator_internal_free_bytes
+        allocator_available_bytes = allocator_internal_free_bytes
         definition = (
-            "minimum of current free physical bytes and reported allocator-available bytes"
+            "internal free bytes of the allocator pool this process already owns; "
+            "external free physical bytes are deliberately excluded so the "
+            "process-owned reservation is not counted twice"
         )
+    else:
+        usable = free_bytes
+        definition = "current free physical bytes reported for the matched device"
+        if allocator_available_bytes is not None:
+            usable = min(usable, allocator_available_bytes)
+            definition = (
+                "minimum of current free physical bytes and reported allocator-available bytes"
+            )
     return DeviceCapacityObservation(
         available=True,
         source=str(source),
@@ -489,6 +526,8 @@ def make_device_capacity_observation(
         allocator_policy=str(allocator_policy),
         usable_device_bytes=usable,
         usable_bytes_definition=definition,
+        current_process_owned_bytes=process_pool_bytes,
+        post_initialization=bool(post_initialization),
     )
 
 
@@ -557,22 +596,25 @@ def allocator_capacity_observation(
             "jax.device.memory_stats", "allocator limit/use statistics are incomplete",
         )
     internal = limit - in_use
-    # A fixed arena cannot safely promise a new large allocation when
-    # fragmentation information is unavailable.  Growing allocators use fresh
-    # external free capacity for their incremental requirement instead.
-    if policy != "no-preallocation" and largest is None:
-        return AllocatorCapacityObservation(
-            False, policy, limit, in_use, peak, None, internal,
-            "jax.device.memory_stats", "largest allocator free block is unavailable",
-        )
+    # A pool that still has internal free bytes cannot simultaneously have a
+    # largest free block of zero.  Backends that never populate the field
+    # report exactly that impossible pair, so classify it as unreported rather
+    # than believing a fragmentation measurement that does not exist.  A real
+    # zero (a completely full pool) stays authoritative.
+    status = "reported"
+    if largest is None:
+        status = "not_reported"
+    elif largest == 0 and internal > 0:
+        largest, status = None, "unsupported_by_backend"
     if largest is not None and largest > internal:
         return AllocatorCapacityObservation(
             False, policy, limit, in_use, peak, largest, internal,
-            "jax.device.memory_stats", "largest allocator free block exceeds internal free bytes",
+            "jax.device.memory_stats",
+            "largest allocator free block exceeds internal free bytes", status,
         )
     return AllocatorCapacityObservation(
         True, policy, limit, in_use, peak, largest, internal,
-        "jax.device.memory_stats", None,
+        "jax.device.memory_stats", None, status,
     )
 
 
@@ -582,6 +624,7 @@ def post_initialization_capacity_preflight(
     bundle: CompiledExecutableBundle,
     external_capacity: DeviceCapacityObservation,
     allocator_capacity: AllocatorCapacityObservation,
+    arguments_resident: bool = True,
 ) -> dict[str, object]:
     """Admit one exact invocation after its arguments already reside on device.
 
@@ -601,7 +644,12 @@ def post_initialization_capacity_preflight(
     argument, output, temporary, aliases = (int(report[name]) for name in fields)
     if aliases > argument + output:
         raise ValueError("post-initialization compiled alias accounting is invalid")
-    incremental = max(0, output + temporary - aliases)
+    # Argument buffers are excluded only once they are genuinely resident on
+    # the device.  Before device inputs exist they still have to be placed, so
+    # the full analysed requirement is charged.
+    incremental = max(0, output + temporary - aliases) if arguments_resident else max(
+        0, argument + output + temporary - aliases
+    )
     margin = feasibility.get("safety_margin_fraction")
     if isinstance(margin, bool) or not isinstance(margin, (int, float)) or not math.isfinite(float(margin)) or float(margin) < 0:
         raise ValueError("post-initialization safety margin is invalid")
@@ -618,18 +666,28 @@ def post_initialization_capacity_preflight(
         largest = None
         derivation = "fresh external free bytes for growing allocator"
     else:
-        if allocator_capacity.internal_free_bytes is None or allocator_capacity.largest_free_block_bytes is None:
+        if allocator_capacity.internal_free_bytes is None:
             raise ValueError("fixed allocator pool statistics are incomplete")
-        admitted = min(
-            allocator_capacity.internal_free_bytes,
-            allocator_capacity.largest_free_block_bytes,
-        )
         largest = allocator_capacity.largest_free_block_bytes
-        derivation = "minimum internal pool free bytes and largest free allocator block"
+        if largest is None:
+            # The backend does not publish a fragmentation measure.  Admit from
+            # the pool's own internal free bytes and record that no
+            # largest-free-block evidence constrained this decision.
+            admitted = allocator_capacity.internal_free_bytes
+            derivation = (
+                "internal pool free bytes; no largest-free-block measure is "
+                f"published by this backend ({allocator_capacity.largest_free_block_status})"
+            )
+        else:
+            admitted = min(allocator_capacity.internal_free_bytes, largest)
+            derivation = "minimum internal pool free bytes and largest free allocator block"
     if admitted < required:
         raise ValueError("post-initialization allocator capacity is insufficient")
     return {
         "passed": True,
+        "phase": "post-initialization",
+        "arguments_resident": bool(arguments_resident),
+        "largest_free_block_status": allocator_capacity.largest_free_block_status,
         "allocator_policy": allocator_capacity.policy,
         "external_total_bytes": external_capacity.total_physical_bytes,
         "external_free_bytes": external_capacity.free_bytes,
@@ -639,7 +697,8 @@ def post_initialization_capacity_preflight(
         "allocator_peak_bytes_in_use": allocator_capacity.peak_bytes_in_use,
         "allocator_internal_free_bytes": allocator_capacity.internal_free_bytes,
         "allocator_largest_free_block_bytes": largest,
-        "already_resident_argument_bytes": argument,
+        "already_resident_argument_bytes": argument if arguments_resident else 0,
+        "charged_argument_bytes": 0 if arguments_resident else argument,
         "incremental_output_bytes": output,
         "incremental_temporary_bytes": temporary,
         "alias_bytes": aliases,
@@ -682,6 +741,7 @@ def discover_nvidia_device_capacity(
     preallocate_setting: str | None = None,
     memory_fraction_setting: str | None = None,
     post_initialization: bool = False,
+    allocator_statistics: Mapping[str, object] | None = None,
 ) -> DeviceCapacityObservation:
     """Query bounded NVIDIA evidence and fail closed if device matching is ambiguous."""
 
@@ -834,6 +894,10 @@ def discover_nvidia_device_capacity(
                 reason="XLA_PYTHON_CLIENT_MEM_FRACTION is not in (0,1]",
             )
         allocator_available = math.floor(row["total"] * fraction)
+        # This comparison is only meaningful before the allocator reserves its
+        # pool.  Afterwards the reservation itself is what removed those bytes
+        # from the external free total, so repeating it would reject the very
+        # pool the policy asked for.
         if not post_initialization and allocator_available > row["free"]:
             return unavailable_device_capacity_observation(
                 source=source,
@@ -852,6 +916,26 @@ def discover_nvidia_device_capacity(
                 "cannot be verified from nominal/free NVIDIA memory alone"
             ),
         )
+    pool_bytes = None
+    internal_free = None
+    if post_initialization:
+        # Requirement: never infer process ownership from an nvidia-smi delta
+        # when a direct allocator statistic exists.
+        allocator = allocator_capacity_observation(
+            allocator_statistics,
+            policy="fraction" if allocator_available is not None else "no-preallocation",
+        )
+        if not allocator.available or allocator.internal_free_bytes is None:
+            return unavailable_device_capacity_observation(
+                source=source,
+                execution_device_identity=execution_device_identity,
+                reason=(
+                    "post-initialization allocator statistics are unavailable: "
+                    f"{allocator.unavailable_reason}"
+                ),
+            )
+        internal_free = allocator.internal_free_bytes
+        pool_bytes = allocator.byte_limit
     return make_device_capacity_observation(
         source=source,
         observed_at_utc=datetime.now(timezone.utc).isoformat(),
@@ -870,6 +954,9 @@ def discover_nvidia_device_capacity(
         used_bytes=row["used"],
         allocator_available_bytes=allocator_available,
         allocator_policy=allocator_policy,
+        post_initialization=post_initialization,
+        process_pool_bytes=pool_bytes,
+        allocator_internal_free_bytes=internal_free,
     )
 
 
@@ -1274,10 +1361,18 @@ def _gpu_capacity_preflight(
         if observation.free_bytes is None or observation.usable_device_bytes is None:
             violations.append("usable_device_capacity_unavailable")
         else:
-            expected_usable = observation.free_bytes
-            if observation.allocator_available_bytes is not None:
-                expected_usable = min(expected_usable, observation.allocator_available_bytes)
-            if expected_usable != observation.usable_device_bytes:
+            if observation.post_initialization:
+                # The pool this process owns is the only memory the executable
+                # can draw on; intersecting it with the external free bytes
+                # beside the reservation would double count.
+                expected_usable = observation.allocator_available_bytes
+            else:
+                expected_usable = observation.free_bytes
+                if observation.allocator_available_bytes is not None:
+                    expected_usable = min(expected_usable, observation.allocator_available_bytes)
+            if expected_usable is None:
+                violations.append("usable_device_capacity_unavailable")
+            elif expected_usable != observation.usable_device_bytes:
                 violations.append("usable_device_capacity_derivation_invalid")
             else:
                 usable = expected_usable

@@ -321,6 +321,41 @@ def main() -> int:
             {"event": "live_environment_revalidated", "utc": datetime.now(timezone.utc).isoformat()}
         )
 
+        # The live doctor is collected before anything lowers or compiles, so
+        # it is the only point at which the allocator has not yet reserved its
+        # pool.  Verifying the configured preallocation target against physical
+        # free memory therefore belongs here and nowhere later; every
+        # subsequent admission is judged from the pool this process owns.
+        pre_capacity = live_doctor.get("capacity", {})
+        if (
+            not isinstance(pre_capacity, dict)
+            or pre_capacity.get("available") is not True
+            or bool(pre_capacity.get("post_initialization"))
+        ):
+            raise ValueError(
+                "pre-initialization device capacity evidence is unavailable: "
+                f"{pre_capacity.get('unavailable_reason') if isinstance(pre_capacity, dict) else 'malformed'}"
+            )
+        payload["pre_initialization_capacity"] = {
+            "phase": "pre-initialization",
+            "observed_at_utc": pre_capacity.get("observed_at_utc"),
+            "total_physical_bytes": pre_capacity.get("total_physical_bytes"),
+            "free_bytes": pre_capacity.get("free_bytes"),
+            "allocator_policy": configuration.allocator_policy,
+            "configured_preallocation_target_bytes": pre_capacity.get(
+                "allocator_available_bytes"
+            ),
+            "usable_device_bytes": pre_capacity.get("usable_device_bytes"),
+            "usable_bytes_definition": pre_capacity.get("usable_bytes_definition"),
+            "stable_device_identity": pre_capacity.get("stable_device_identity"),
+        }
+        payload["event_log"].append(
+            {
+                "event": "pre_initialization_capacity_verified",
+                "utc": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
         records = payload.setdefault("records", [])
         execute_case = stage != PilotStage.FULL_GRID_ANALYZE
         expected_signature = None

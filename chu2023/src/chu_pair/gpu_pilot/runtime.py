@@ -94,6 +94,17 @@ def _model(configuration: PilotConfiguration) -> dict[str, object]:
     }
 
 
+def _device_memory_statistics():
+    """Read the exact JAX device's allocator statistics, or None."""
+
+    device = jax.devices()[0]
+    reader = getattr(device, "memory_stats", None)
+    try:
+        return reader() if callable(reader) else None
+    except Exception:
+        return None
+
+
 def _capacity_observation(signature: dict[str, object], *, post_initialization: bool = False):
     provider = CudaDriverIdentityProvider.from_system()
     return discover_nvidia_device_capacity(
@@ -104,6 +115,7 @@ def _capacity_observation(signature: dict[str, object], *, post_initialization: 
         preallocate_setting=os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE"),
         memory_fraction_setting=os.environ.get("XLA_PYTHON_CLIENT_MEM_FRACTION"),
         post_initialization=post_initialization,
+        allocator_statistics=_device_memory_statistics() if post_initialization else None,
     )
 
 
@@ -249,7 +261,11 @@ def compile_and_maybe_execute_case(
                 * (1.0 + configuration.safety_margin_fraction)
             ),
         }
-        capacity = _capacity_observation(signature)
+        # ``lowered.compile()`` above already reserved the configured
+        # preallocation pool, so this admission point is past allocator
+        # initialization.  Device inputs still do not exist, so the identity
+        # gate keeps charging the full analysed requirement.
+        capacity = _capacity_observation(signature, post_initialization=True)
         if kernel == "separable":
             capacity_gate = production_capacity_preflight(
                 feasibility=feasibility, bundle=bundle,
