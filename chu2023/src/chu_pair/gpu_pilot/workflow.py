@@ -243,7 +243,7 @@ def load_pilot_configuration(path: Path) -> PilotConfiguration:
     if not isinstance(run_name, str) or not _RUN_NAME.fullmatch(run_name):
         raise ValueError("output.run_name must be bounded safe ASCII")
     normalized = {
-        "stage": stage.value, "allocator_policy": allocator,
+        "stage": stage, "allocator_policy": allocator,
         "memory_fraction": memory_fraction, "alpha": alpha, "tau": tau,
         "state_probabilities": states, "histogram_seed": histogram_seed,
         "samples_per_grid_cell": samples_per_cell,

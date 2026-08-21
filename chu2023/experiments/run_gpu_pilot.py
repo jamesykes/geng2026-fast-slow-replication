@@ -15,6 +15,10 @@ import subprocess
 import sys
 import time
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from chu_pair.gpu_pilot.allocator import apply_allocator_policy
 from chu_pair.gpu_pilot.workflow import (
     PilotStage,
@@ -30,7 +34,6 @@ from chu_pair.gpu_pilot.workflow import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "gpu_pilot"
 _ARTIFACT_WRITTEN = False
 _PREVIOUS = {

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
 import builtins
 import os
+import subprocess
 import sys
 import time
 
@@ -345,3 +346,94 @@ def test_timeout_wrapper_kills_forked_descendant_and_writes_failure_artifact(tmp
     time.sleep(0.1)
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def test_direct_path_invocation_lets_runtime_import_its_benchmark_dependency() -> None:
+    """Regression: ``python experiments/run_gpu_pilot.py`` must reach the runtime.
+
+    Executing the runner by path puts ``experiments/`` on ``sys.path[0]`` and
+    leaves the project root off the path entirely, so the top-level
+    ``from experiments import run_pair_separable_benchmark`` in
+    ``chu_pair/gpu_pilot/runtime.py`` previously raised ``ModuleNotFoundError``
+    only under the documented command. This reproduces that exact import
+    context in a subprocess and requires the runtime to import.
+    """
+
+    probe = (
+        "import json, pathlib, runpy, sys\n"
+        "root = pathlib.Path.cwd().resolve()\n"
+        "scripts_dir = root / 'experiments'\n"
+        # Reproduce `python experiments/run_gpu_pilot.py`: the script directory
+        # leads sys.path and neither '' nor the project root appears on it.
+        "sys.path[:] = [str(scripts_dir)] + [\n"
+        "    p for p in sys.path[1:] if p not in ('', '.', str(root), str(scripts_dir))\n"
+        "]\n"
+        # The emulation is only meaningful if `experiments` is unavailable now.
+        "import importlib.util\n"
+        "assert importlib.util.find_spec('experiments') is None, 'path emulation failed'\n"
+        "runpy.run_path(str(scripts_dir / 'run_gpu_pilot.py'), run_name='pilot_under_test')\n"
+        "import chu_pair.gpu_pilot.runtime as runtime\n"
+        "print(json.dumps({'benchmark': runtime.benchmark.__file__}))\n"
+    )
+    environment = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    environment["JAX_PLATFORM_NAME"] = "cpu"
+    completed = subprocess.run(
+        [sys.executable, "-c", probe], cwd=PROJECT_ROOT, env=environment,
+        capture_output=True, text=True, timeout=300,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+    resolved = json.loads(completed.stdout.strip().splitlines()[-1])["benchmark"]
+    assert Path(resolved) == PROJECT_ROOT / "experiments" / "run_pair_separable_benchmark.py"
+
+
+@pytest.mark.parametrize(
+    ("name", "stage"),
+    [
+        ("gpu_pilot_small.toml", PilotStage.SMALL),
+        ("gpu_pilot_medium.toml", PilotStage.MEDIUM),
+        ("gpu_pilot_large.toml", PilotStage.LARGE_PILOT),
+        ("gpu_pilot_full_grid_one_step.toml.disabled", PilotStage.FULL_GRID_ONE_STEP),
+    ],
+)
+def test_loaded_configuration_keeps_a_real_stage_enum_for_the_runtime(name, stage) -> None:
+    """Regression: the loader must not downgrade ``stage`` to a bare ``str``.
+
+    ``PilotStage`` subclasses ``str``, so every ``==`` comparison tolerated the
+    downgrade and only the runtime's ``configuration.stage.value`` accesses
+    failed, after the live GPU revalidation. This reaches the host-only grid
+    description with a configuration from the real loader.
+    """
+
+    from chu_pair.gpu_pilot import runtime
+
+    configuration = load_pilot_configuration(PROJECT_ROOT / "configs" / name)
+    assert configuration.stage is stage
+    assert isinstance(configuration.stage, PilotStage)
+    assert configuration.stage.value == stage.value
+
+    described = runtime._case(configuration, grid_size=configuration.grids[0])
+    assert described["label"] == f"gpu-{stage.value}-g{configuration.grids[0]}"
+    # The two remaining runtime accesses must resolve for this stage as well.
+    assert (("flat", "separable") if configuration.stage.value == "small" else ("separable",))
+    if stage is not PilotStage.FULL_GRID_ANALYZE:
+        assert runtime._REPETITIONS[configuration.stage.value] >= 1
+
+
+def test_normalized_stage_serializes_as_the_same_external_string() -> None:
+    """The enum repair must not move any digest or serialized contract."""
+
+    configuration = load_pilot_configuration(PROJECT_ROOT / "configs/gpu_pilot_small.toml")
+    payload = asdict(configuration)
+    assert payload["stage"] is PilotStage.SMALL
+    assert json.dumps({"stage": payload["stage"]}) == '{"stage": "small"}'
+    assert json.loads(json.dumps(payload, sort_keys=True))["stage"] == "small"
+    # Digests observed before the repair; the enum must not move either.
+    assert configuration.normalized_sha256 == (
+        "98be5035fe731af869187a7e85bc12c474706527ece070644df396cbfa26dba2"
+    )
+    assert executable_configuration_sha256(configuration) == (
+        "9904040302c0b56f120dae795b351d47d49e67420e551906df6079ad769a75c6"
+    )
+    reloaded = load_pilot_configuration(PROJECT_ROOT / "configs/gpu_pilot_small.toml")
+    assert reloaded.normalized_sha256 == configuration.normalized_sha256
+    assert executable_configuration_sha256(reloaded) == executable_configuration_sha256(configuration)
