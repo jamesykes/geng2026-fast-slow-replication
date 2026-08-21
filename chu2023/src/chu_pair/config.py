@@ -8,6 +8,15 @@ import math
 
 MAX_ABM_SEED = 2**32 - 1
 
+# Explicit dot-product precision for the pair-density contractions.  XLA lowers
+# float32 ``dot_general`` to TF32 tensor cores by default on Ampere and newer
+# NVIDIA hardware (~1e-3 relative accuracy), which inflated the H100
+# conditional-weight residual from the float32 rounding scale (~1.2e-7) to
+# ~4e-4 and violated the reviewed 1e-4 diagnostic tolerance.  Declared here so
+# configuration and provenance can record it without importing JAX.  It is a
+# fixed policy: configuration cannot restore the platform default.
+PAIR_CONTRACTION_PRECISION = "highest"
+
 
 def validate_abm_seed(seed: int) -> int:
     """Validate a seed representable without aliasing by ``PRNGKey``."""

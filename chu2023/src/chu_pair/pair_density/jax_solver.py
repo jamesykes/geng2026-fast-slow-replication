@@ -13,6 +13,7 @@ import numpy as np
 
 from ..grids import GridBoundsError, QGrid
 from ..initial_conditions import DiscreteQHistogram
+from ..config import PAIR_CONTRACTION_PRECISION
 from ..model import PAYOFF_TENSOR, TRANSITION_TENSOR
 from ..policies import _two_action_boltzmann_probabilities
 from .numpy_reference import PairSymmetryError
@@ -323,6 +324,29 @@ def _policy(grid: JAXPairGrid, tau, dtype) -> jax.Array:
     return _two_action_boltzmann_probabilities(grid.q_points.astype(dtype), tau_value, jnp)
 
 
+# XLA lowers float32 ``dot_general`` to TF32 tensor cores by default on
+# Ampere and newer NVIDIA hardware.  That is roughly 1e-3 relative accuracy,
+# which on an H100 inflated the conditional-weight residual of ``w(s,b|q)``
+# from the float32 rounding scale (~1.2e-7) to ~4e-4 and so violated the
+# reviewed ``diagnostic_tolerance`` of 1e-4.  These three contractions are the
+# only ones in the pair-density calculation, and they form the conditional
+# one-edge law and its payoff moments, so they are pinned to full float32.
+# Storage, arithmetic elsewhere, dtypes and every scientific formula are
+# unchanged; this fixes only how the dot products are evaluated.
+_PRECISION_BY_NAME = {"highest": jax.lax.Precision.HIGHEST}
+if PAIR_CONTRACTION_PRECISION not in _PRECISION_BY_NAME:      # pragma: no cover
+    raise RuntimeError(
+        f"unsupported pair contraction precision {PAIR_CONTRACTION_PRECISION!r}"
+    )
+_CONTRACTION_PRECISION = _PRECISION_BY_NAME[PAIR_CONTRACTION_PRECISION]
+
+
+def pair_contraction_precision() -> str:
+    """Name of the explicit precision policy used by pair contractions."""
+
+    return PAIR_CONTRACTION_PRECISION
+
+
 def one_edge_moments_jax(
     pair_mass: jax.Array,
     grid: JAXPairGrid,
@@ -337,15 +361,21 @@ def one_edge_moments_jax(
     focal = jnp.sum(mass, axis=(0, 2))
     occupied = focal > 0
     opponent_policy = _policy(grid, tau, mass.dtype)
-    numerators = jnp.einsum("smv,vb->msb", mass, opponent_policy)
+    numerators = jnp.einsum(
+        "smv,vb->msb", mass, opponent_policy, precision=_CONTRACTION_PRECISION,
+    )
     weights = jnp.where(
         occupied[:, None, None],
         numerators / jnp.where(occupied, focal, 1)[:, None, None],
         jnp.zeros((), dtype=mass.dtype),
     )
     payoff = jnp.asarray(PAYOFF_TENSOR, dtype=mass.dtype)
-    mean = jnp.einsum("msb,sab->ma", weights, payoff)
-    second = jnp.einsum("msb,sab->ma", weights, payoff * payoff)
+    mean = jnp.einsum(
+        "msb,sab->ma", weights, payoff, precision=_CONTRACTION_PRECISION,
+    )
+    second = jnp.einsum(
+        "msb,sab->ma", weights, payoff * payoff, precision=_CONTRACTION_PRECISION,
+    )
     variance = second - mean * mean
     return JAXOneEdgeMoments(focal, weights, mean, second, variance, occupied)
 

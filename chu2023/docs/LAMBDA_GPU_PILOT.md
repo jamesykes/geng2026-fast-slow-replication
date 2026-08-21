@@ -69,6 +69,10 @@ For numeric `CUDA_VISIBLE_DEVICES`, a ctypes CUDA Driver API provider maps the J
 
 Capacity is a point-in-time estimate, not a guarantee. Executable admission accepts evidence for at most 60 seconds and recollects it immediately before every invocation.
 
+## Float32 contraction precision
+
+Every pilot executable evaluates the pair-density contractions at explicit full float32 (`jax.lax.Precision.HIGHEST`) rather than the platform default. On Ampere and newer NVIDIA GPUs the default TF32 lowering violated the reviewed `diagnostic_tolerance = 1e-4` for the conditional-weight diagnostic. The policy is fixed, recorded as `contraction_precision` in normalized configuration, contracts, signatures, the doctor report and stage artifacts, and changing it invalidates existing doctors and prerequisites. See `MODEL_SPEC.md` for the scientific statement.
+
 ## Run the staged pilot
 
 Real numerical stages require `--execute`, a matching clean doctor, a successful atomic prerequisite, and `--hourly-price-usd` exactly equal to the reviewed config. Because the checked-in templates deliberately contain `0.0` rather than a possibly stale cloud price, copy each chosen template beneath ignored `outputs/gpu_pilot/`, give the whole stage chain the same console price and session budget, review each copy, and pass the same price on the command line. A changed price/budget requires a new chain. This preserves a clean source tree while normalized config/digest enter the artifact. Cost is only `elapsed_seconds / 3600 * hourly_price_usd`, not billing data.

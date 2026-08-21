@@ -105,6 +105,7 @@ class PilotConfiguration:
     max_stage_seconds: int
     safety_margin_fraction: float
     run_name: str
+    contraction_precision: str
     normalized_sha256: str
 
 
@@ -121,6 +122,14 @@ def _integer(value: object, name: str, *, lower: int, upper: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
         raise ValueError(f"{name} must be an integer in [{lower}, {upper}]")
     return value
+
+
+def _contraction_precision() -> str:
+    """Authoritative explicit precision policy for pair-density contractions."""
+
+    from ..config import PAIR_CONTRACTION_PRECISION
+
+    return PAIR_CONTRACTION_PRECISION
 
 
 def _canonical_sha256(value: Mapping[str, object]) -> str:
@@ -254,6 +263,10 @@ def load_pilot_configuration(path: Path) -> PilotConfiguration:
         "hourly_price_usd": price, "max_session_cost_usd": session_cost,
         "max_stage_seconds": max_seconds, "safety_margin_fraction": margin,
         "run_name": run_name,
+        # Fixed numerical policy, deliberately not configurable: a pilot
+        # configuration must not be able to restore the platform default and
+        # reintroduce TF32 error into the conditional-weight diagnostic.
+        "contraction_precision": _contraction_precision(),
     }
     return PilotConfiguration(**normalized, normalized_sha256=_canonical_sha256(normalized))
 
@@ -351,6 +364,7 @@ def executable_configuration_sha256(configuration: PilotConfiguration) -> str:
         "column_block_size": configuration.column_block_size,
         "diagnostic_tolerance": configuration.diagnostic_tolerance,
         "symmetry_tolerance": configuration.symmetry_tolerance,
+        "contraction_precision": configuration.contraction_precision,
     }
     return _canonical_sha256(payload)
 
@@ -390,6 +404,7 @@ def stage_invariant_contract(
         "action_order": ("C", "D"), "state_order": ("SH", "PD"),
         "initialization_law": "seeded-legacy-scaled-beta-joint-histogram",
         "pair_transport": "exact-separable-legacy-projection",
+        "contraction_precision": configuration.contraction_precision,
         "alpha": configuration.alpha, "tau": configuration.tau,
         "dtype": configuration.dtype,
         "allocator_policy": configuration.allocator_policy,

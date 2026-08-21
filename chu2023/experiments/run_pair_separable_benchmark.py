@@ -27,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
     import tomli as tomllib
 
 from chu_pair.grids import QGrid
+from chu_pair.pair_density import pair_contraction_precision
 from chu_pair.initial_conditions import tiny_histogram
 from chu_pair.pair_density import (
     CompiledExecutableBundle,
@@ -422,6 +423,11 @@ def _runtime_environment_signature() -> dict:
     return {
         "backend": str(jax.default_backend()),
         "platform": identities[0]["platform"],
+        # Explicit dot-product precision is part of executable identity: the
+        # same lowering at a different precision is a different numerical
+        # object, so a change must invalidate compiled and prerequisite
+        # provenance rather than pass silently.
+        "pair_contraction_precision": pair_contraction_precision(),
         "execution_device": identities[0],
         "visible_devices": identities,
         "jax_enable_x64": bool(jax.config.read("jax_enable_x64")),

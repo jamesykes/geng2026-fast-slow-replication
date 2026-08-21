@@ -427,13 +427,70 @@ def test_normalized_stage_serializes_as_the_same_external_string() -> None:
     assert payload["stage"] is PilotStage.SMALL
     assert json.dumps({"stage": payload["stage"]}) == '{"stage": "small"}'
     assert json.loads(json.dumps(payload, sort_keys=True))["stage"] == "small"
-    # Digests observed before the repair; the enum must not move either.
+    # Pinned digests. These moved exactly once, when the explicit float32
+    # contraction-precision policy joined the normalized configuration and the
+    # executable contract; that change must invalidate older provenance.
     assert configuration.normalized_sha256 == (
-        "98be5035fe731af869187a7e85bc12c474706527ece070644df396cbfa26dba2"
+        "6d1eb77504f4b56f7c6041b427fe56b61d08390f0bd051e283af93ae1da9b9c7"
     )
     assert executable_configuration_sha256(configuration) == (
-        "9904040302c0b56f120dae795b351d47d49e67420e551906df6079ad769a75c6"
+        "adff57d9b6ab1267c72b2b25eb7f430d2392229a0346a0d0511e602c52671c83"
     )
     reloaded = load_pilot_configuration(PROJECT_ROOT / "configs/gpu_pilot_small.toml")
     assert reloaded.normalized_sha256 == configuration.normalized_sha256
     assert executable_configuration_sha256(reloaded) == executable_configuration_sha256(configuration)
+
+
+def test_contraction_precision_is_fixed_and_reaches_every_provenance_record() -> None:
+    """The explicit precision policy is part of scientific/executable identity."""
+
+    from chu_pair.config import PAIR_CONTRACTION_PRECISION
+    from chu_pair.pair_density import pair_contraction_precision
+
+    assert PAIR_CONTRACTION_PRECISION == "highest"
+    assert pair_contraction_precision() == PAIR_CONTRACTION_PRECISION
+
+    configuration = load_pilot_configuration(PROJECT_ROOT / "configs/gpu_pilot_small.toml")
+    assert configuration.contraction_precision == "highest"
+
+    hashes = {
+        name: "a" * 64 for name in (
+            "src/chu_pair/model.py", "src/chu_pair/initial_conditions.py",
+            "src/chu_pair/pair_density/jax_solver.py",
+        )
+    }
+    contract = stage_invariant_contract(
+        configuration, commit="c" * 40, environment_sha256="e" * 64, source_hashes=hashes,
+    )
+    assert contract["contraction_precision"] == "highest"
+
+    # A different policy must move the normalized, executable and contract
+    # digests so incompatible prerequisites cannot be reused.
+    other = replace(configuration, contraction_precision="default")
+    assert executable_configuration_sha256(other) != executable_configuration_sha256(configuration)
+    assert stage_invariant_contract_sha256(
+        stage_invariant_contract(
+            other, commit="c" * 40, environment_sha256="e" * 64, source_hashes=hashes,
+        )
+    ) != stage_invariant_contract_sha256(contract)
+
+
+def test_configuration_parsing_stays_free_of_jax() -> None:
+    """The precision policy must not drag JAX into pre-allocator config parsing."""
+
+    probe = (
+        "import sys, json\n"
+        "from pathlib import Path\n"
+        "from chu_pair.gpu_pilot.workflow import load_pilot_configuration\n"
+        "c = load_pilot_configuration(Path('configs/gpu_pilot_small.toml'))\n"
+        "print(json.dumps({'precision': c.contraction_precision,\n"
+        "                  'jax_imported': 'jax' in sys.modules}))\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe], cwd=PROJECT_ROOT,
+        capture_output=True, text=True, timeout=300,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["precision"] == "highest"
+    assert result["jax_imported"] is False

@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -22,6 +28,8 @@ from chu_pair.pair_density import (
     simulate_pair_source_summaries_jit,
 )
 from chu_pair.pair_density.numpy_reference import pair_mass_step
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _heterogeneous_source(dtype) -> np.ndarray:
@@ -441,3 +449,108 @@ def test_separable_cpu_x64_matches_numpy_and_flat_tightly() -> None:
     actual = np.asarray(flat_to_canonical_layout(separable.mass, jax_grid))
     np.testing.assert_allclose(actual, expected, rtol=3e-14, atol=3e-16)
     np.testing.assert_allclose(np.asarray(separable.mass), np.asarray(flat.mass), rtol=3e-14, atol=3e-16)
+
+
+def _precision_probe_source() -> str:
+    """Fresh-process probe comparing default and explicit contraction precision."""
+
+    return (
+        "import json, os\n"
+        "from chu_pair.gpu_pilot.allocator import apply_allocator_policy\n"
+        "apply_allocator_policy('fraction', memory_fraction=0.85)\n"
+        "import jax, jax.numpy as jnp, numpy as np\n"
+        "if jax.default_backend() != 'gpu':\n"
+        "    print(json.dumps({'skipped': 'no gpu backend'})); raise SystemExit(0)\n"
+        "from chu_pair.grids import QGrid\n"
+        "from chu_pair.initial_conditions import seeded_legacy_histogram\n"
+        "from chu_pair.pair_density import (\n"
+        "    build_jax_pair_grid, simulate_pair_source_summaries_from_histogram_jit as fn,\n"
+        "    pair_contraction_precision)\n"
+        "grid = QGrid(-0.4, 1.2, 0.4)\n"
+        "hist = seeded_legacy_histogram(grid, seed=20230818,\n"
+        "    samples_per_grid_cell=10).mass.reshape(-1)\n"
+        "out = {'policy': pair_contraction_precision()}\n"
+        "def run():\n"
+        "    r = fn(jnp.asarray(hist, jnp.float32), jnp.asarray([0.5, 0.5], jnp.float32),\n"
+        "           build_jax_pair_grid(grid, jnp.float32), 0.4, 1.3,\n"
+        "           jnp.asarray([0, 1, 2], jnp.int32), steps=2, summary_count=3,\n"
+        "           chunk_size=64, diagnostic_tolerance=1e-4, kernel='separable',\n"
+        "           row_block_size=32, column_block_size=32)\n"
+        "    return float(np.asarray(r.diagnostics.conditional_weight_error).max())\n"
+        "out['explicit'] = run()\n"
+        # Operation-local precision deliberately overrides any global matmul
+        # context, so the pre-repair behaviour is reproduced by unpinning the
+        # module policy and retracing.
+        "from chu_pair.pair_density import jax_solver\n"
+        "jax_solver._CONTRACTION_PRECISION = jax.lax.Precision.DEFAULT\n"
+        "jax.clear_caches()\n"
+        "out['default'] = run()\n"
+        "print(json.dumps(out))\n"
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHU_PAIR_GPU_PRECISION_CHECK") != "1",
+    reason="opt-in real-GPU precision check; set CHU_PAIR_GPU_PRECISION_CHECK=1",
+)
+def test_real_gpu_default_precision_violates_conditional_weight_tolerance() -> None:
+    """Opt-in: demonstrate the defect and its repair on real NVIDIA hardware.
+
+    On an H100 the platform-default TF32 lowering produces a conditional-weight
+    residual around 4e-4, above the reviewed 1e-4 diagnostic tolerance, while
+    the explicit full-float32 policy restores the float32 rounding scale near
+    1.2e-7. Runs in a fresh subprocess because the allocator policy must be
+    applied before JAX is imported, and never runs on CPU-only hosts.
+    """
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _precision_probe_source()], cwd=PROJECT_ROOT,
+        capture_output=True, text=True, timeout=900,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    if "skipped" in result:
+        pytest.skip(result["skipped"])
+    assert result["policy"] == "highest"
+    # The platform default is capable of violating the reviewed tolerance...
+    assert result["default"] > 1e-4
+    # ...and the explicit policy restores float32 rounding accuracy.
+    assert result["explicit"] < 1e-5
+    assert result["explicit"] < result["default"] / 100.0
+
+
+def test_contraction_precision_is_explicit_in_both_kernels() -> None:
+    """Both kernels share the one contraction path and its explicit precision."""
+
+    from chu_pair.pair_density import jax_solver
+
+    assert jax_solver.PAIR_CONTRACTION_PRECISION == "highest"
+    assert jax_solver._CONTRACTION_PRECISION is jax.lax.Precision.HIGHEST
+
+    source = Path(jax_solver.__file__).read_text()
+    # Every contraction in the pair-density calculation must pass the policy.
+    assert source.count("jnp.einsum(") == 3
+    assert source.count("precision=_CONTRACTION_PRECISION") == 3
+
+
+def test_conditional_weights_stay_at_float32_rounding_scale() -> None:
+    """CPU float32 parity and invariants are unchanged by the precision policy."""
+
+    grid = QGrid(-0.4, 1.2, 0.4)
+    mass = np.full((grid.size, grid.size), 1.0 / grid.size**2)
+    histogram = DiscreteQHistogram(grid, mass)
+    for kernel in ("flat", "separable"):
+        result = simulate_pair_source_summaries_from_histogram_jit(
+            jnp.asarray(histogram.mass.reshape(-1), jnp.float32),
+            jnp.asarray([0.5, 0.5], jnp.float32),
+            build_jax_pair_grid(grid, jnp.float32), 0.4, 1.3,
+            jnp.asarray([0, 1], jnp.int32), steps=1, summary_count=2,
+            chunk_size=64, diagnostic_tolerance=1e-4, kernel=kernel,
+            row_block_size=32, column_block_size=32,
+        )
+        diagnostics = result.diagnostics
+        assert float(np.asarray(diagnostics.conditional_weight_error).max()) < 1e-5
+        assert float(np.abs(np.asarray(diagnostics.total_mass) - 1.0).max()) < 1e-5
+        assert bool(np.all(np.asarray(diagnostics.finite, dtype=bool)))
+        assert bool(np.all(np.asarray(diagnostics.nonnegative, dtype=bool)))
+        assert bool(np.all(np.asarray(result.destinations_valid, dtype=bool)))

@@ -135,6 +135,7 @@ def environment_sha256(report: dict[str, object]) -> str:
         "devices": report["devices"],
         "allocator": report["allocator_environment"],
         "cuda_family": report["cuda_family"],
+        "pair_contraction_precision": report["pair_contraction_precision"],
     }
     encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("ascii")).hexdigest()
@@ -152,6 +153,7 @@ def collect_gpu_doctor_report(
 ) -> dict[str, object]:
     """Collect a whitelisted report; CPU is represented as expected unavailability."""
 
+    from ..pair_density import pair_contraction_precision
     from ..pair_density.separable_resources import discover_nvidia_device_capacity
 
     if cuda_family not in {"cuda12", "cuda13"}:
@@ -229,6 +231,9 @@ def collect_gpu_doctor_report(
             "numpy": EXPECTED_NUMPY_VERSION,
         },
         "cuda_family": cuda_family,
+        # Explicit float32 dot-product policy: part of numerical identity, so
+        # a change invalidates this doctor and every artifact bound to it.
+        "pair_contraction_precision": pair_contraction_precision(),
         "host_memory": _host_memory(),
         "backend": str(jax_module.default_backend()),
         "jax_enable_x64": bool(jax_module.config.read("jax_enable_x64")),
