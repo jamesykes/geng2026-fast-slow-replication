@@ -554,3 +554,72 @@ def test_conditional_weights_stay_at_float32_rounding_scale() -> None:
         assert bool(np.all(np.asarray(diagnostics.finite, dtype=bool)))
         assert bool(np.all(np.asarray(diagnostics.nonnegative, dtype=bool)))
         assert bool(np.all(np.asarray(result.destinations_valid, dtype=bool)))
+
+
+def test_compiled_program_digest_distinguishes_precision_lowerings() -> None:
+    """The program fingerprint must separate programs the signature cannot."""
+
+    from chu_pair.pair_density import jax_solver
+    import experiments.run_pair_separable_benchmark as bench
+
+    grid = QGrid(-0.4, 1.2, 0.4)
+    abstract_hist = jax.ShapeDtypeStruct((grid.size * grid.size,), jnp.float32)
+    abstract_states = jax.ShapeDtypeStruct((2,), jnp.float32)
+    abstract_grid = build_jax_pair_grid(grid, jnp.float32)
+    slots = jnp.asarray([0, 1], jnp.int32)
+    static = dict(steps=1, summary_count=2, chunk_size=64, diagnostic_tolerance=1e-4,
+                  kernel="separable", row_block_size=32, column_block_size=32)
+
+    original = jax_solver._CONTRACTION_PRECISION
+    digests = {}
+    try:
+        for name, precision in (("highest", jax.lax.Precision.HIGHEST),
+                                ("default", jax.lax.Precision.DEFAULT)):
+            jax_solver._CONTRACTION_PRECISION = precision
+            jax.clear_caches()
+            lowered = simulate_pair_source_summaries_from_histogram_jit.lower(
+                abstract_hist, abstract_states, abstract_grid, 0.4, 1.3, slots, **static)
+            digests[name] = bench._compiled_program_fingerprint(lowered)
+    finally:
+        jax_solver._CONTRACTION_PRECISION = original
+        jax.clear_caches()
+
+    assert digests["highest"][0] != digests["default"][0]
+    for _, evidence in digests.values():
+        assert evidence["ir_dialect"] == "stablehlo"
+        assert evidence["ir_bytes"] > 0
+        assert "not a cross-version claim" in evidence["reproducibility_scope"]
+        assert set(evidence) >= {"jax_version", "jaxlib_version", "backend",
+                                 "device_kind", "jax_enable_x64"}
+
+
+def test_compiled_program_evidence_fails_closed() -> None:
+    """Missing or malformed program evidence must be rejected."""
+
+    from chu_pair.pair_density import (make_compiled_executable_bundle,
+                                       validate_compiled_executable_bundle)
+
+    good = {"ir_dialect": "stablehlo", "ir_bytes": 10, "jax_version": "0",
+            "jaxlib_version": "0", "backend": "cpu", "device_kind": "t",
+            "jax_enable_x64": False}
+    kwargs = dict(compiled_callable=lambda *a, **k: None, memory_report={},
+                  compile_signature={"a": 1}, abstract_arguments={}, static_values={},
+                  runtime_environment={})
+    for digest, evidence, match in (
+        ("not-a-digest", good, "malformed"),
+        ("0" * 63, good, "malformed"),
+        ("0" * 64, {"ir_dialect": "stablehlo"}, "lacks"),
+        ("0" * 64, "not-a-mapping", "malformed"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            make_compiled_executable_bundle(
+                **kwargs, compiled_program_sha256=digest, compiled_program_evidence=evidence)
+
+    bundle = make_compiled_executable_bundle(
+        **kwargs, compiled_program_sha256="a" * 64, compiled_program_evidence=good)
+    assert bundle.compiled_program_sha256 == "a" * 64
+    # Tampering with the digest must break bundle integrity.
+    import dataclasses
+    tampered = dataclasses.replace(bundle, compiled_program_sha256="b" * 64)
+    with pytest.raises(ValueError):
+        validate_compiled_executable_bundle(tampered)

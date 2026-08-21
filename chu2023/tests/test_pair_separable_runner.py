@@ -24,6 +24,14 @@ from chu_pair.pair_density import (
 )
 
 
+_TEST_PROGRAM_SHA = "0" * 64
+_TEST_PROGRAM_EVIDENCE = {
+    "ir_dialect": "stablehlo", "ir_bytes": 128, "jax_version": "0.0.0",
+    "jaxlib_version": "0.0.0", "backend": "cpu", "device_kind": "test",
+    "jax_enable_x64": False,
+}
+
+
 def _raw() -> dict:
     return runner.inspect_raw_config(runner.load_config(runner.DEFAULT_CONFIG))
 
@@ -270,6 +278,8 @@ def _production_bundle(projection: dict, *, signature_updates: dict | None = Non
         abstract_arguments=abstract,
         static_values=static,
         runtime_environment=environment,
+        compiled_program_sha256=_TEST_PROGRAM_SHA,
+        compiled_program_evidence=_TEST_PROGRAM_EVIDENCE,
     )
     return bundle, called
 
@@ -343,6 +353,8 @@ def test_full_grid_projection_is_exact_allocation_free_and_capacity_fails_closed
         abstract_arguments={},
         static_values={},
         runtime_environment={},
+        compiled_program_sha256=_TEST_PROGRAM_SHA,
+        compiled_program_evidence=_TEST_PROGRAM_EVIDENCE,
     )
     with pytest.raises(ValueError, match="not overridable"):
         production_capacity_preflight(
@@ -701,6 +713,8 @@ def _benchmark_fake_bundle(signature: dict, report_updates: dict | None = None):
             abstract_arguments=abstract,
             static_values=static,
             runtime_environment=environment,
+            compiled_program_sha256=_TEST_PROGRAM_SHA,
+            compiled_program_evidence=_TEST_PROGRAM_EVIDENCE,
         ),
         calls,
     )
@@ -807,6 +821,8 @@ def test_live_memory_analysis_must_match_the_stored_report() -> None:
         abstract_arguments=original.abstract_arguments,
         static_values=original.static_values,
         runtime_environment=original.runtime_environment,
+        compiled_program_sha256=_TEST_PROGRAM_SHA,
+        compiled_program_evidence=_TEST_PROGRAM_EVIDENCE,
     )
     estimate = estimate_separable_resources(
         grid_size=case["grid_size"], dtype_bytes=4, steps=case["steps"],

@@ -23,6 +23,8 @@ STATIC_DEVICE_FIXED_BYTES = 4 * 1024
 MAX_CAPACITY_EVIDENCE_AGE_SECONDS = 60
 MAX_NVIDIA_SMI_OUTPUT_BYTES = 16 * 1024
 NVIDIA_SMI_TIMEOUT_SECONDS = 5
+_SHA256_TEXT = re.compile(r"^[0-9a-f]{64}$")
+MAX_COMPILED_PROGRAM_EVIDENCE_BYTES = 4096
 MAX_CAPACITY_TEXT_CHARS = 512
 MAX_STABLE_IDENTITY_FIELDS = 8
 MAX_CLOCK_SKEW_SECONDS = 1
@@ -51,6 +53,13 @@ class CompiledExecutableBundle:
     runtime_environment: Mapping[str, object]
     callable_identity: int
     signature_sha256: str
+    # Digest of the exact bounded compiler IR that produced this callable.
+    # The high-level signature records declared policy; two lowerings differing
+    # only in dot-product precision share it, so the program digest is what
+    # distinguishes the generated programs. It is toolchain-specific and is
+    # NOT a cross-version reproducibility claim.
+    compiled_program_sha256: str
+    compiled_program_evidence: Mapping[str, object]
     bundle_integrity_sha256: str
     _factory_token: object = field(repr=False, compare=False)
 
@@ -118,6 +127,8 @@ def _bundle_integrity_payload(
     static_values: Mapping[str, object],
     runtime_environment: Mapping[str, object],
     callable_identity: int,
+    compiled_program_sha256: str,
+    compiled_program_evidence: Mapping[str, object],
 ) -> dict[str, object]:
     return {
         "memory_report": dict(memory_report),
@@ -126,6 +137,8 @@ def _bundle_integrity_payload(
         "static_values": dict(static_values),
         "runtime_environment": dict(runtime_environment),
         "callable_identity": int(callable_identity),
+        "compiled_program_sha256": str(compiled_program_sha256),
+        "compiled_program_evidence": dict(compiled_program_evidence),
     }
 
 
@@ -137,11 +150,30 @@ def make_compiled_executable_bundle(
     abstract_arguments: Mapping[str, object],
     static_values: Mapping[str, object],
     runtime_environment: Mapping[str, object],
+    compiled_program_sha256: str,
+    compiled_program_evidence: Mapping[str, object],
 ) -> CompiledExecutableBundle:
     """Bind one analyzed callable to immutable, independently checkable facts."""
 
     if not callable(compiled_callable):
         raise TypeError("compiled_callable must be callable")
+    if not isinstance(compiled_program_sha256, str) or not _SHA256_TEXT.fullmatch(
+        compiled_program_sha256
+    ):
+        raise ValueError("compiled program digest is missing or malformed")
+    if not isinstance(compiled_program_evidence, Mapping):
+        raise ValueError("compiled program evidence is missing or malformed")
+    program_evidence = {
+        key: compiled_program_evidence[key] for key in sorted(compiled_program_evidence)
+    }
+    for name in ("jax_version", "jaxlib_version", "backend", "device_kind",
+                 "jax_enable_x64", "ir_dialect", "ir_bytes"):
+        if name not in program_evidence:
+            raise ValueError(f"compiled program evidence lacks {name}")
+    if len(json.dumps(program_evidence, ensure_ascii=True, sort_keys=True)) > (
+        MAX_COMPILED_PROGRAM_EVIDENCE_BYTES
+    ):
+        raise ValueError("compiled program evidence exceeds its fixed bound")
     signature = dict(compile_signature)
     digest = _canonical_digest(signature)
     report = dict(memory_report)
@@ -159,6 +191,8 @@ def make_compiled_executable_bundle(
             static_values=static,
             runtime_environment=environment,
             callable_identity=callable_identity,
+            compiled_program_sha256=compiled_program_sha256,
+            compiled_program_evidence=program_evidence,
         )
     )
     return CompiledExecutableBundle(
@@ -170,6 +204,8 @@ def make_compiled_executable_bundle(
         runtime_environment=environment,
         callable_identity=callable_identity,
         signature_sha256=digest,
+        compiled_program_sha256=compiled_program_sha256,
+        compiled_program_evidence=program_evidence,
         bundle_integrity_sha256=integrity,
         _factory_token=_BUNDLE_FACTORY_TOKEN,
     )
@@ -254,6 +290,12 @@ def validate_compiled_executable_bundle(
         raise ValueError("compiled memory report disagrees with its signature")
     if bundle.memory_report.get("executable_signature_sha256") != digest:
         raise ValueError("compiled memory report has the wrong signature digest")
+    if not isinstance(bundle.compiled_program_sha256, str) or not _SHA256_TEXT.fullmatch(
+        bundle.compiled_program_sha256
+    ):
+        raise ValueError("compiled program digest is missing or malformed")
+    if not isinstance(bundle.compiled_program_evidence, Mapping) or not bundle.compiled_program_evidence:
+        raise ValueError("compiled program evidence is missing or malformed")
     if expected_compile_signature is not None and dict(expected_compile_signature) != dict(
         bundle.compile_signature
     ):
@@ -419,6 +461,8 @@ def validate_compiled_executable_bundle(
             static_values=bundle.static_values,
             runtime_environment=environment,
             callable_identity=bundle.callable_identity,
+            compiled_program_sha256=bundle.compiled_program_sha256,
+            compiled_program_evidence=bundle.compiled_program_evidence,
         )
     )
     if integrity != bundle.bundle_integrity_sha256:

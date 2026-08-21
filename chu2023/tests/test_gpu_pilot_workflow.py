@@ -641,3 +641,70 @@ def test_successful_case_record_shape_is_unchanged(monkeypatch) -> None:
     assert result["invoked"] is True
     assert "failure" not in result
     assert result["parity"] is None
+
+
+def _diagnostics_stub(*, weight_error, variance, valid=True):
+    from types import SimpleNamespace
+    import numpy as _np
+    return SimpleNamespace(
+        total_mass=_np.array([1.0]), state_masses=_np.array([[0.5, 0.5]]),
+        mean_q=_np.array([[0.0, 0.0]]), mean_action_probability=_np.array([[0.5, 0.5]]),
+        symmetry_error=_np.array([0.0]), minimum_mass=_np.array([0.0]),
+        finite=_np.array([True]), nonnegative=_np.array([True]),
+        conditional_weight_error=_np.array([weight_error]),
+        minimum_conditional_variance=_np.array([variance]),
+        conditional_moments_valid=_np.array([valid]),
+    )
+
+
+def test_scientific_summary_binds_actual_conditional_margins() -> None:
+    """Successful artifacts must prove the numerical margin, not just a Boolean."""
+
+    from types import SimpleNamespace
+    from chu_pair.gpu_pilot import runtime
+
+    configuration = load_pilot_configuration(PROJECT_ROOT / "configs/gpu_pilot_small.toml")
+    result = SimpleNamespace(
+        diagnostics=_diagnostics_stub(weight_error=2.5e-07, variance=0.125),
+        destinations_valid=True,
+    )
+    summary = runtime._scientific_summary(
+        result, configuration=configuration, grid_size=9, kernel="separable",
+    )
+    assert summary["conditional_weight_error_max"] == pytest.approx(2.5e-07)
+    assert summary["minimum_conditional_variance"] == pytest.approx(0.125)
+    assert summary["conditional_moments_valid"] is True
+    assert summary["diagnostic_tolerance"] == pytest.approx(1e-4)
+    # The recorded margin must be the real ratio, so a near-miss is visible.
+    assert summary["conditional_weight_margin_ratio"] == pytest.approx(1e-4 / 2.5e-07)
+    assert summary["grid_size"] == 9 and summary["kernel"] == "separable"
+    assert summary["dtype"] == "float32" and summary["contraction_precision"] == "highest"
+
+    tight = runtime._scientific_summary(
+        SimpleNamespace(diagnostics=_diagnostics_stub(weight_error=9.9e-05, variance=0.0),
+                        destinations_valid=True),
+        configuration=configuration, grid_size=9, kernel="flat",
+    )
+    # Inside tolerance but only just: the artifact now shows that explicitly.
+    assert tight["conditional_weight_margin_ratio"] < 1.02
+    assert tight["minimum_conditional_variance"] == 0.0
+
+    encoded = json.dumps(summary, ensure_ascii=True, sort_keys=True)
+    assert len(encoded.encode("ascii")) < 2048
+
+
+def test_scientific_summary_reports_invalid_conditional_moments() -> None:
+    """A false moment-validity flag must survive into the record."""
+
+    from types import SimpleNamespace
+    from chu_pair.gpu_pilot import runtime
+
+    configuration = load_pilot_configuration(PROJECT_ROOT / "configs/gpu_pilot_small.toml")
+    summary = runtime._scientific_summary(
+        SimpleNamespace(diagnostics=_diagnostics_stub(weight_error=1e-07, variance=-1.0, valid=False),
+                        destinations_valid=False),
+        configuration=configuration, grid_size=3, kernel="separable",
+    )
+    assert summary["conditional_moments_valid"] is False
+    assert summary["all_destinations_valid"] is False
+    assert summary["minimum_conditional_variance"] == pytest.approx(-1.0)

@@ -175,9 +175,41 @@ class _GpuMemorySampler:
             self._thread.join(timeout=3)
 
 
-def _scientific_summary(result) -> dict[str, object]:
+def _scientific_summary(
+    result, *, configuration: PilotConfiguration, grid_size: int, kernel: str,
+) -> dict[str, object]:
+    """Bounded scientific evidence read from the exact executed callable.
+
+    The conditional-weight and conditional-variance values are the diagnostics
+    the executed callable returned and that the tolerance gate consumed; they
+    are not recomputed by another path. Recording the actual margin, not only a
+    Boolean, lets a successful artifact prove how far inside tolerance it was.
+    """
+
     diagnostics = jax.device_get(result.diagnostics)
+    conditional_weight_error = float(
+        np.max(np.abs(np.asarray(diagnostics.conditional_weight_error)))
+    )
+    minimum_conditional_variance = float(
+        np.min(np.asarray(diagnostics.minimum_conditional_variance))
+    )
     return {
+        "conditional_weight_error_max": conditional_weight_error,
+        "minimum_conditional_variance": minimum_conditional_variance,
+        "conditional_moments_valid": bool(
+            np.all(np.asarray(diagnostics.conditional_moments_valid))
+        ),
+        "diagnostic_tolerance": float(configuration.diagnostic_tolerance),
+        "symmetry_tolerance": float(configuration.symmetry_tolerance),
+        "conditional_weight_margin_ratio": (
+            float(configuration.diagnostic_tolerance) / conditional_weight_error
+            if conditional_weight_error > 0.0 else None
+        ),
+        "grid_size": int(grid_size),
+        "steps": int(configuration.steps),
+        "kernel": str(kernel),
+        "dtype": str(configuration.dtype),
+        "contraction_precision": str(configuration.contraction_precision),
         "total_mass": np.asarray(diagnostics.total_mass).tolist(),
         "state_masses": np.asarray(diagnostics.state_masses).tolist(),
         "mean_q": np.asarray(diagnostics.mean_q).tolist(),
@@ -328,6 +360,9 @@ def _run_case(
             key: value for key, value in report.items() if key != "executable_signature"
         }
         kernel_record["executable_signature_sha256"] = bundle.signature_sha256
+        kernel_record["compiled_program_sha256"] = bundle.compiled_program_sha256
+        kernel_record["compiled_program_evidence"] = dict(bundle.compiled_program_evidence)
+        kernel_record["bundle_integrity_sha256"] = bundle.bundle_integrity_sha256
         progress["phase"] = "capacity_admission"
         feasibility = {
             "state_expanded_cells": case["state_expanded_cells"],
@@ -432,7 +467,9 @@ def _run_case(
             minimum_execution_seconds=float(np.min(sample_array)),
             maximum_execution_seconds=float(np.max(sample_array)),
             mad_execution_seconds=float(np.median(np.abs(sample_array - median))),
-            scientific_diagnostics=_scientific_summary(result),
+            scientific_diagnostics=_scientific_summary(
+                result, configuration=configuration, grid_size=grid_size, kernel=kernel,
+            ),
         )
     record["phases"]["scientific_validation"] = "passed"
     progress.update(kernel=None, phase="parity")

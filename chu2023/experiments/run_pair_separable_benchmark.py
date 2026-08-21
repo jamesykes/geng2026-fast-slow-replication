@@ -578,6 +578,41 @@ def _bounded_memory_report(bundle: CompiledExecutableBundle) -> dict:
     return report
 
 
+def _compiled_program_fingerprint(lowered) -> tuple[str, dict]:
+    """Digest the exact bounded compiler IR that this compilation consumes.
+
+    ``jax`` cannot stably serialize a compiled executable, so the defensible
+    fingerprint is the StableHLO module handed to the compiler. It is taken
+    from the same ``lowered`` object that is compiled on the next line, so it
+    binds the program that produced the retained callable. The digest is
+    toolchain-specific: it is evidence of program identity within this
+    JAX/JAXLIB and backend, not a cross-version reproducibility claim. The IR
+    text itself is never retained, only its digest and bounded metadata.
+    """
+
+    try:
+        text = lowered.as_text()
+    except Exception as error:  # pragma: no cover - defensive, fails closed
+        raise RuntimeError(
+            f"compiled program IR is unavailable: {type(error).__name__}: {error}"
+        ) from error
+    if not isinstance(text, str) or not text:
+        raise RuntimeError("compiled program IR is unavailable")
+    encoded = text.encode("utf-8")
+    devices = jax.devices()
+    evidence = {
+        "ir_dialect": "stablehlo",
+        "ir_bytes": len(encoded),
+        "jax_version": str(jax.__version__),
+        "jaxlib_version": str(jaxlib.__version__),
+        "backend": str(jax.default_backend()),
+        "device_kind": str(devices[0].device_kind) if devices else "unavailable",
+        "jax_enable_x64": bool(jax.config.read("jax_enable_x64")),
+        "reproducibility_scope": "toolchain-specific; not a cross-version claim",
+    }
+    return hashlib.sha256(encoded).hexdigest(), evidence
+
+
 def _compile_and_analyze(
     lowered,
     signature: dict,
@@ -586,6 +621,7 @@ def _compile_and_analyze(
 ) -> tuple[CompiledExecutableBundle, float]:
     """Compile and analyze without invoking the executable."""
 
+    program_digest, program_evidence = _compiled_program_fingerprint(lowered)
     start = time.perf_counter()
     compiled = lowered.compile()
     compile_seconds = time.perf_counter() - start
@@ -598,6 +634,8 @@ def _compile_and_analyze(
         abstract_arguments=abstract,
         static_values=static,
         runtime_environment=environment,
+        compiled_program_sha256=program_digest,
+        compiled_program_evidence=program_evidence,
     )
     return bundle, compile_seconds
 
