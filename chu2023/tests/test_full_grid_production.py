@@ -156,7 +156,7 @@ def test_configuration_rejects_designs_outside_production_limits(tmp_path) -> No
 
     text = PRODUCTION_CONFIG.read_text()
     cases = [
-        ("num_runs = 512", "num_runs = 4096", "simulation.num_runs"),
+        ("num_runs = 512", "num_runs = 8192", "simulation.num_runs"),
         ("num_agents = 128", "num_agents = 4096", "simulation.num_agents"),
         ("spacing = 0.01", "spacing = 0.1", "G=131"),
         ('dtype = "float32"', 'dtype = "float64"', "float32"),
@@ -235,3 +235,82 @@ def test_pair_source_time_alignment_uses_requested_times() -> None:
     unused = [t for t in range(len(slots)) if t not in config["source_times"]]
     assert all(slots[t] == -1 for t in unused)
     assert max(config["source_times"]) < config["steps"]
+
+
+def test_production_limit_admits_the_audited_r4096_extension() -> None:
+    """The R guard is raised explicitly and audited, never bypassed."""
+
+    assert production.PRODUCTION_LIMITS["max_runs"] == 4096
+    text = (PROJECT_ROOT / "outputs" / "full_grid_production" / "production.toml").read_text()
+    for runs, ok in ((512, True), (4096, True), (4097, False), (8192, False)):
+        path = PROJECT_ROOT / "outputs" / "full_grid_production" / f".limit-{runs}.toml"
+        path.write_text(text.replace("num_runs = 512", f"num_runs = {runs}"))
+        try:
+            if ok:
+                config = production.load_production_config(path)
+                assert config["num_runs"] == runs
+                assert production.estimate_production_resources(config)["violations"] == []
+            else:
+                with pytest.raises(ValueError, match="simulation.num_runs"):
+                    production.load_production_config(path)
+        finally:
+            path.unlink()
+
+
+def test_r4096_resource_estimates_stay_inside_audited_limits() -> None:
+    """Allocation-free formulas must bound the R=4096 lifetimes."""
+
+    text = (PROJECT_ROOT / "outputs" / "full_grid_production" / "production.toml").read_text()
+    path = PROJECT_ROOT / "outputs" / "full_grid_production" / ".r4096-estimate.toml"
+    path.write_text(text.replace("num_runs = 512", "num_runs = 4096"))
+    try:
+        config = production.load_production_config(path)
+        estimate = production.estimate_production_resources(config)
+    finally:
+        path.unlink()
+    assert estimate["violations"] == []
+    # per-run sufficient statistics scale linearly in R and stay bounded.
+    assert estimate["per_run_sufficient_statistic_bytes"] == 4096 * 33 * 64 * 2 * 11 * 8
+    assert (estimate["per_run_sufficient_statistic_bytes"]
+            <= production.PRODUCTION_LIMITS["max_per_run_statistic_bytes"])
+    assert estimate["bootstrap_weight_bytes"] == 2000 * 4096 * 4
+    assert estimate["comparison_rows"] == (4 + 16 + 64) * 8 * 2
+    assert estimate["grid_size"] == 131 and estimate["agent_grid_points"] == 17161
+
+
+def test_convergence_prefixes_are_pre_registered_through_4096() -> None:
+    """Prefixes are global run prefixes, capped at the total and at 4096."""
+
+    import inspect
+    source = inspect.getsource(production._run_count_convergence)
+    assert "(32, 64, 128, 256, 512, 1024, 2048, 4096)" in source
+    assert "8192" not in source
+
+
+def test_heartbeat_covers_every_phase() -> None:
+    """The stall that made a finished run look hung must not recur."""
+
+    import inspect
+    main_source = inspect.getsource(production.main)
+    pair_source = inspect.getsource(production.run_pair_full_grid)
+    convergence_source = inspect.getsource(production._run_count_convergence)
+    combined = main_source + pair_source + convergence_source
+    for phase in ("prerequisite_preparation", "pair_compilation", "pair_execution",
+                  "aggregation", "bootstrap", "convergence_prefix",
+                  "output_serialization", "final_verification", "complete"):
+        assert f'"phase": "{phase}"' in combined, phase
+    # every heartbeat payload carries time, phase, progress and a latest path
+    assert '"latest_path"' in combined
+    assert "elapsed_seconds" in inspect.getsource(production.main)
+
+
+def test_heartbeat_writes_atomically_and_boundedly(tmp_path) -> None:
+    """Heartbeats replace atomically and stay small."""
+
+    path = tmp_path / "heartbeat.json"
+    for index in range(3):
+        production._atomic_json(path, {"phase": "abm", "completed": index, "total": 3})
+        payload = json.loads(path.read_text())
+        assert payload["completed"] == index
+        assert path.stat().st_size < 4096
+    assert [p.name for p in tmp_path.iterdir()] == ["heartbeat.json"]

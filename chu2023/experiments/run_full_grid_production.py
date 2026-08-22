@@ -47,7 +47,7 @@ PRODUCTION_LIMITS = {
     "grid_size": 131,               # exact full grid
     "max_agents": 128,
     "max_steps": 64,                # pre-registered T=32 with headroom
-    "max_runs": 1024,               # pre-registered R=512 (+512 extension)
+    "max_runs": 4096,               # audited: R=512 primary, R=4096 precision extension
     "max_bootstrap_replicates": 2000,
     "max_source_times": 16,
     "max_bin_schemes": 4,
@@ -304,7 +304,8 @@ def initialize_runs_by_global_index(graph, histogram, *, abm_seed, indices, dtyp
     return states, simulation_keys
 
 
-def run_pair_full_grid(config: dict, *, output: Path, telemetry: list) -> dict:
+def run_pair_full_grid(config: dict, *, output: Path, telemetry: list,
+                       heartbeat=lambda payload: None) -> dict:
     """Exact G=131 separable evolution: admission order identical to the pilot."""
 
     import jax
@@ -365,6 +366,7 @@ def run_pair_full_grid(config: dict, *, output: Path, telemetry: list) -> dict:
         case, model, histogram=abstract_histogram, state_probabilities=abstract_states,
         grid=abstract_grid, slots=slots_host, kernel="separable",
         output_mode="bounded_from_histogram")
+    heartbeat({"phase": "pair_compilation", "completed": 0, "total": 1, "latest_path": str(output)})
     started = time.perf_counter()
     bundle, compile_seconds = benchmark._compile_and_analyze(
         lowered, signature, static_host_bytes=int(config.get("_static_host_bytes", 1 << 20)))
@@ -397,6 +399,8 @@ def run_pair_full_grid(config: dict, *, output: Path, telemetry: list) -> dict:
     post_gate = post_initialization_capacity_preflight(
         feasibility=feasibility, bundle=bundle, external_capacity=fresh,
         allocator_capacity=pilot._allocator_capacity(pilot_configuration))
+    heartbeat({"phase": "pair_execution", "completed": 0, "total": config["steps"],
+               "latest_path": str(output)})
     execute_start = time.perf_counter()
     result = benchmark._invoke_accepted_bundle(
         bundle, arguments, case=case, model=model, kernel="separable",
@@ -641,11 +645,17 @@ def main() -> int:
         _atomic_json(stage_path, payload)
 
     try:
-        heartbeat({"phase": "pair", "completed_runs": 0, "total_runs": config["num_runs"]})
-        pair_stage = run_pair_full_grid(config, output=output, telemetry=telemetry)
+        heartbeat({"phase": "prerequisite_preparation", "completed": 1, "total": 1,
+                   "latest_path": str(args.prerequisite)})
+        heartbeat({"phase": "pair_lower_compile_execute", "completed": 0, "total": 1,
+                   "latest_path": str(output)})
+        pair_stage = run_pair_full_grid(config, output=output, telemetry=telemetry,
+                                        heartbeat=heartbeat)
         stage["pair"] = pair_stage["summary"]
         stage["event_log"].append({"event": "pair_full_grid_completed",
                                    "utc": datetime.now(timezone.utc).isoformat()})
+        heartbeat({"phase": "pair_complete", "completed": 1, "total": 1,
+                   "latest_path": str(output / "stage.json")})
         write_stage()
 
         schemes = [(s["name"], QBinSpec(np.asarray(s["q_c_edges"], dtype=np.float64),
@@ -666,8 +676,10 @@ def main() -> int:
                                    "utc": datetime.now(timezone.utc).isoformat()})
         write_stage()
 
+        heartbeat({"phase": "aggregation", "completed": 0, "total": len(schemes),
+                   "latest_path": str(output)})
         results, reconstruction = [], []
-        for name, bins in schemes:
+        for scheme_index, (name, bins) in enumerate(schemes):
             is_finest = name == finest_name
             abm_scheme = abm_statistics if is_finest else coarsen_abm_sufficient(abm_statistics, bins)
             pair_scheme = finest_pair if is_finest else coarsen_pair_sufficient(finest_pair, bins)
@@ -682,8 +694,15 @@ def main() -> int:
                                           ratio_epsilon=config["ratio_epsilon"])
             weights = bootstrap_run_weights(config["num_runs"], config["bootstrap_replicates"],
                                             config["bootstrap_seed"])
+            heartbeat({"phase": "bootstrap", "scheme": name,
+                       "completed": scheme_index, "total": len(schemes),
+                       "replicates": config["bootstrap_replicates"],
+                       "runs": config["num_runs"], "latest_path": str(output)})
             intervals = bootstrap_four_way_intervals(
                 selected, moments, weights, confidence_level=config["confidence_level"])
+            heartbeat({"phase": "bootstrap_scheme_complete", "scheme": name,
+                       "completed": scheme_index + 1, "total": len(schemes),
+                       "latest_path": str(output)})
             results.append((type("S", (), {"name": name, "bins": bins})(), comparison, intervals))
             if is_finest:
                 stage["bootstrap_weights_sha256"] = hashlib.sha256(
@@ -693,6 +712,8 @@ def main() -> int:
         stage["event_log"].append({"event": "comparison_completed",
                                    "utc": datetime.now(timezone.utc).isoformat()})
 
+        heartbeat({"phase": "output_serialization", "completed": 0, "total": 4,
+                   "latest_path": str(output)})
         rows = list(phase5.iter_comparison_rows(results, config["source_times"], np.dtype("float32")))
         anchor_rows = list(phase5.iter_anchor_rows(results, [tuple(a) for a in config["anchors"]],
                                                    config["source_times"], np.dtype("float32")))
@@ -710,9 +731,14 @@ def main() -> int:
             "target_relative_full_width": 0.20,
             "target_met": bool(median_width <= 0.20) if math.isfinite(median_width) else False,
         }
+        heartbeat({"phase": "convergence", "completed": 0, "total": 1,
+                   "latest_path": str(output)})
         convergence = _run_count_convergence(
-            config, abm_statistics, schemes, finest_pair, finest_name, output)
+            config, abm_statistics, schemes, finest_pair, finest_name, output,
+            heartbeat=heartbeat)
         _write_csv(output / "run_count_convergence.csv", convergence)
+        heartbeat({"phase": "final_verification", "completed": 0, "total": 1,
+                   "latest_path": str(output / "stage.json")})
 
         elapsed = time.perf_counter() - start
         stage.update(status="success", completed_utc=datetime.now(timezone.utc).isoformat(),
@@ -723,6 +749,8 @@ def main() -> int:
                            "claim_scope": "elapsed-time estimate from the user-supplied instance price; not billing data"})
         stage["event_log"].append({"event": "production_succeeded",
                                    "utc": datetime.now(timezone.utc).isoformat()})
+        heartbeat({"phase": "complete", "completed": 1, "total": 1,
+                   "latest_path": str(stage_path)})
         _atomic_json(output / "metadata.json", _metadata(config, doctor, stage, manifest))
         _atomic_write(output / "production_config.toml", args.config.resolve().read_bytes())
         write_stage()
@@ -759,7 +787,8 @@ def _write_csv(path: Path, rows) -> None:
     _atomic_write(path, buffer.getvalue().encode("ascii", "backslashreplace"))
 
 
-def _run_count_convergence(config, abm_statistics, schemes, finest_pair, finest_name, output):
+def _run_count_convergence(config, abm_statistics, schemes, finest_pair, finest_name, output,
+                           *, heartbeat=lambda payload: None):
     """Nested global run prefixes; no resampling and no extra simulation."""
 
     import numpy as np
@@ -775,11 +804,14 @@ def _run_count_convergence(config, abm_statistics, schemes, finest_pair, finest_
               "sum_reward_squared", "sum_selected_q", "sum_selected_q_squared",
               "sum_reward_selected_q", "sum_velocity", "sum_velocity_squared")
     total = config["num_runs"]
-    prefixes = [r for r in (32, 64, 128, 256, 512, 1024) if r <= total]
+    prefixes = [r for r in (32, 64, 128, 256, 512, 1024, 2048, 4096) if r <= total]
     if total not in prefixes:
         prefixes.append(total)
     out = []
-    for prefix in prefixes:
+    for prefix_index, prefix in enumerate(prefixes):
+        heartbeat({"phase": "convergence_prefix", "runs": prefix,
+                   "completed": prefix_index, "total": len(prefixes),
+                   "latest_path": str(output)})
         subset = BinnedSufficientStatistics(
             bins=abm_statistics.bins, num_agents=abm_statistics.num_agents,
             alpha=abm_statistics.alpha, min_count=abm_statistics.min_count,
