@@ -23,7 +23,8 @@
 - Production GPU capacity requires evidence no older than the immutable 60-second cap and matched by UUID, MIG UUID, normalized PCI identity or a trusted CUDA-runtime ordinal mapping. Never compare numeric CUDA visibility tokens with `nvidia-smi` indices. `--allow-expensive` cannot override executable identity, analysis completeness, backend, device matching or capacity evidence.
 - Keep ordinary separable tests and benchmarks at `G<=17`. The `G=131` calculation is allocation-free feasibility only until an exact executable analysis, compatible GPU and known device capacity pass the production preflight.
 - Ordinary GPU-pilot validation is CPU-only and mocked. Never query a real GPU or lower, compile, allocate, or execute `G=131` locally; real stages require the documented clean-cloud prerequisite ladder and explicit confirmations.
-- Do not add counterfactual unselected-action instrumentation, focal-agent resampling, production/full-grid runs, interpolation, production inference, or unvalidated GPU claims yet.
+- Do not add counterfactual unselected-action instrumentation, focal-agent resampling, interpolation, production inference, or unvalidated GPU claims yet.
+- The human has authorised exactly one exact full-grid Phase 5 production variance experiment: `G=131` separable pair evolution through `T=32`, `alpha=0.4`, `tau=2.0`, `n=128`, `R=512` independent runs with a pre-registered extension to `R=1024`, `B=2000` complete-run clustered bootstrap replicates, and pointwise descriptive intervals with no multiplicity-adjusted inferential claim. It runs only through `experiments/run_full_grid_production.py` behind the phrase `RUN EXACT G131 PRODUCTION VARIANCE` and the full prerequisite ladder. No other production or full-grid run is authorised.
 
 Commands:
 

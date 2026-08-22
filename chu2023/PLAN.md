@@ -18,7 +18,7 @@ D_j(q,t) = Var[v_j^i | Q_t^i=q, A_t^i=a_j]
 
 The first version will measure distinct-opponent covariance from the ABM and will treat `c_j=0` only as an explicitly labelled conditional-independence pair closure. It will not implement a triplet closure or substitute an unconditional action-mixture variance for `D_j(q,t)`.
 
-The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1, 2, the bounded selected-action Phase 3A and independent-run uncertainty Phase 3B milestones, the bounded CPU Phase 4 JAX pair solver, Phase 5 matched comparison, and the exact separable part of Phase 6 are implemented. Counterfactual diagnostics, interpolation/convergence, an actual production GPU run, and full variance experiments remain future work.
+The original paper and `case2_1.py` remain immutable provenance artifacts. Phases 1, 2, the bounded selected-action Phase 3A and independent-run uncertainty Phase 3B milestones, the bounded CPU Phase 4 JAX pair solver, Phase 5 matched comparison, and the exact separable part of Phase 6 are implemented. Counterfactual diagnostics and interpolation/convergence remain future work. The human has now authorised one exact full-grid Phase 5 production variance experiment on the validated H100 path; its pre-registered parameters are recorded in `AGENTS.md` and `MODEL_SPEC.md` and implemented by `experiments/run_full_grid_production.py`. No further production run is authorised.
 
 ## 2. Proposed repository structure
 
@@ -321,7 +321,7 @@ Exit gate:
 
 - Add separately labelled counterfactual `Y_ih^(C)` and `Y_ih^(D)` diagnostics and their selected-action weighting checks.
 - Add focal-agent repeated-measure diagnostics only if a scientifically justified resampling design is specified; complete runs remain the current uncertainty unit.
-- Choose production run count, bootstrap count, bin schemes, anchors, sparse-stratum thresholds, and any multiplicity-adjusted inference before scientific use.
+- **Chosen by the human for the authorised experiment**: run count `R=512` with a pre-registered extension to `R=1024` if the median pointwise relative CI full width exceeds `0.20`; bootstrap `B=2000`, seed `31032023`, percentile method `linear`, 95% pointwise intervals; the existing coarse and fine bin schemes plus one exact midpoint refinement of the fine scheme; the existing anchors unchanged; the existing sparse-stratum rules unchanged; and explicitly **no** multiplicity-adjusted inference, so intervals are pointwise descriptive only.
 - Perform the final pair/ABM four-way comparison in Phase 5, now that the bounded JAX pair solver exists; do not fold it into Phase 4.
 
 ## 8. Phase 4 - JAX pair solver on CPU

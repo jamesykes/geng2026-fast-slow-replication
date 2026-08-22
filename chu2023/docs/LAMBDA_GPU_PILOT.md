@@ -118,6 +118,10 @@ The disabled template lowers and compiles the exact one-step bounded separable o
 ANALYZE EXACT G131 SEPARABLE
 ```
 
+### Full-grid production variance experiment
+
+After the one-step stage succeeds at the same commit, the authorised production experiment runs through `experiments/run_full_grid_production.py` with a reviewed ignored config copy, the phrase `RUN EXACT G131 PRODUCTION VARIANCE`, and the successful one-step artifact as prerequisite. It evolves `G=131` for `T=32`, runs the matched ABM in deterministic checkpointed chunks, and writes a bounded atomic `stage.json` beside its CSV/NPZ/JSON outputs. Launch it in a fresh process so the allocator pool starts near-empty; `largest_free_block_bytes` is unsupported on this backend, so fragmentation is not measured.
+
 ### One full-grid step
 
 The separate disabled template is hard-limited to `steps=1`, requires a successful full analysis no more than ten minutes old, and exact phrase:
